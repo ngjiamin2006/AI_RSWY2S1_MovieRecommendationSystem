@@ -57,3 +57,46 @@ def recommend(movies, genre_matrix, movie_ids, movie_id_to_row, genre_names,
     out = movies[movies["movieId"].isin(results)][["movieId", "title", "genres"]].copy()
     out["score"] = out["movieId"].map(lambda mid: combined[movie_id_to_row[mid]])
     return out.sort_values("score", ascending=False).reset_index(drop=True)
+
+
+def recommend_tfidf(movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer,
+                     user_item_matrix, liked_movie_ids: list[int] | None = None,
+                     selected_genres: list[str] | None = None, top_n: int = 10, alpha: float = 0.5):
+    """Same blend as recommend(), but scoring content-based with the richer TF-IDF matrix."""
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    cb_profile = content_based.build_tfidf_profile(
+        tfidf_matrix, movie_id_to_row, liked_movie_ids, vectorizer, selected_genres
+    )
+    cb_scores = cosine_similarity(cb_profile, tfidf_matrix)[0] if cb_profile is not None else np.zeros(len(movie_ids))
+
+    cf_scores = np.zeros(len(movie_ids))
+    if liked_movie_ids:
+        liked_rows = [movie_id_to_row[mid] for mid in liked_movie_ids if mid in movie_id_to_row]
+        if liked_rows:
+            liked_vectors = user_item_matrix[liked_rows]
+            cf_scores = cosine_similarity(liked_vectors, user_item_matrix).mean(axis=0)
+
+    def normalize(arr):
+        span = arr.max() - arr.min()
+        return (arr - arr.min()) / span if span > 0 else arr
+
+    combined = alpha * normalize(cb_scores) + (1 - alpha) * normalize(cf_scores)
+
+    exclude = set(liked_movie_ids or [])
+    order = np.argsort(-combined)
+    results = []
+    for idx in order:
+        mid = movie_ids[idx]
+        if mid in exclude:
+            continue
+        results.append(mid)
+        if len(results) >= top_n:
+            break
+
+    if not results:
+        return None
+
+    out = movies[movies["movieId"].isin(results)][["movieId", "title", "genres"]].copy()
+    out["score"] = out["movieId"].map(lambda mid: combined[movie_id_to_row[mid]])
+    return out.sort_values("score", ascending=False).reset_index(drop=True)
