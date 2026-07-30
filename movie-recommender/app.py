@@ -89,20 +89,8 @@ if "liked_movie_ids" not in st.session_state:
     st.session_state.liked_movie_ids = st.session_state.local_profiles[st.session_state.current_user]
 if "selected_genres" not in st.session_state:
     st.session_state.selected_genres = []
-if "onboarded" not in st.session_state:
-    st.session_state.onboarded = False
 
 st.title(":clapper: Movie Recommender")
-
-# ---- Onboarding (cold start) ----
-if not st.session_state.onboarded:
-    st.subheader("Welcome! What do you like to watch?")
-    chosen = st.multiselect("Pick a few genres you enjoy", options=genre_names)
-    if st.button("Get my recommendations", disabled=not chosen):
-        st.session_state.selected_genres = chosen
-        st.session_state.onboarded = True
-        st.rerun()
-    st.stop()
 
 
 def render_recommendations(df, key_prefix, show_score=True, score_label="score"):
@@ -141,7 +129,6 @@ with st.sidebar:
         st.session_state.current_user = selected_user
         # Point the shared liked_movie_ids to the newly selected user's list
         st.session_state.liked_movie_ids = st.session_state.local_profiles[selected_user]
-        st.session_state.onboarded = True
         st.rerun()
 
     st.divider()
@@ -168,6 +155,15 @@ with tab_home:
     c1.metric("Movies", f"{len(movies):,}")
     c2.metric("Ratings", f"{len(ratings):,}")
     c3.metric("Users", f"{ratings['userId'].nunique():,}")
+    
+    st.divider()
+    st.write("### What do you like to watch?")
+    st.session_state.selected_genres = st.multiselect(
+        "Pick a few genres you enjoy (Cold Start Preferences)", 
+        options=genre_names, 
+        default=st.session_state.selected_genres
+    )
+    
     st.caption(
         "Content-Based, Collaborative Filtering, and Hybrid tabs use TMDb-enriched TF-IDF features "
         "(overview/keywords/cast/director) when available, falling back to genre-only similarity otherwise."
