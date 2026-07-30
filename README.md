@@ -40,6 +40,13 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+```
+cd movie-recommender
+venv\Scripts\activate
+streamlit run app.py
+```
+
+
 This opens the app in your browser (default `http://localhost:8501`). On first use you'll be asked to pick a few favorite genres (onboarding), then you can browse recommendations under each algorithm's tab, like movies, and check the **Evaluation** tab for metrics.
 
 To run the offline evaluation (precision/recall/F1/RMSE) without the UI:
@@ -47,6 +54,7 @@ To run the offline evaluation (precision/recall/F1/RMSE) without the UI:
 ```bash
 python evaluation.py
 ```
+
 
 ## Algorithms
 

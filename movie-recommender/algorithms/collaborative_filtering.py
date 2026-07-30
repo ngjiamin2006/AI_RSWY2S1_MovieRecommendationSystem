@@ -14,7 +14,7 @@ should fall back to a popularity list (see data_loader.get_popular_movies).
 Ideas for extending this beyond the baseline:
 - Try user-based CF instead of item-based and compare results.
 - Try matrix factorization (e.g. sklearn's TruncatedSVD on the
-  user-item matrix) instead of a similarity lookup.
+    user-item matrix) instead of a similarity lookup.
 """
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
@@ -22,7 +22,7 @@ from scipy.sparse import csr_matrix
 
 
 def recommend(movies, user_item_matrix: csr_matrix, movie_ids: np.ndarray, movie_id_to_row: dict,
-              liked_movie_ids: list[int] | None = None, top_n: int = 10):
+                liked_movie_ids: list[int] | None = None, top_n: int = 10):
     """Return top_n movies most similar to the user's liked movies.
 
     Returns a DataFrame with columns: movieId, title, genres, score
@@ -86,3 +86,76 @@ def predict_rating(user_item_matrix: csr_matrix, movie_id_to_row: dict, user_col
     if top_sims.sum() <= 0:
         return None
     return float(np.dot(top_sims, top_ratings) / top_sims.sum())
+
+
+def recommend_user_based(movies, user_item_matrix: csr_matrix, movie_ids: np.ndarray, movie_id_to_row: dict,
+                         current_user: str, local_profiles: dict, top_n: int = 10):
+    my_likes = set(local_profiles.get(current_user, []))
+    if not my_likes:
+        return None, "You haven't liked any movies yet. Like some movies to see collaborative recommendations!"
+
+    my_set = set(my_likes)
+    
+    # Calculate similarity (Jaccard) with other local users
+    best_match_user = None
+    best_match_score = 0.0
+    best_match_likes = []
+    
+    for other_user, their_likes in local_profiles.items():
+        if other_user == current_user or not their_likes:
+            continue
+            
+        their_set = set(their_likes)
+        intersection = len(my_set & their_set)
+        union = len(my_set | their_set)
+        jaccard = intersection / union if union > 0 else 0
+        
+        if jaccard > best_match_score:
+            best_match_score = jaccard
+            best_match_user = other_user
+            best_match_likes = their_likes
+
+    if not best_match_user or best_match_score == 0:
+        return None, "We couldn't find any other local users with similar tastes yet. Try switching to another user and liking the same movies!"
+
+    # Recommend what the best match liked, but I haven't seen
+    user_based_recs = [mid for mid in best_match_likes if mid not in my_set]
+
+    # We also get the standard item-based recommendations to pad the list
+    # so the user always sees 10 movies, making the UI look consistent.
+    liked_rows = [movie_id_to_row[mid] for mid in my_likes if mid in movie_id_to_row]
+    cf_scores = np.zeros(len(movie_ids))
+    if liked_rows:
+        liked_vectors = user_item_matrix[liked_rows]
+        cf_scores = cosine_similarity(liked_vectors, user_item_matrix).mean(axis=0)
+        
+    order = np.argsort(-cf_scores)
+    item_based_recs = []
+    for idx in order:
+        mid = movie_ids[idx]
+        if mid not in my_set and mid not in user_based_recs and cf_scores[idx] > 0:
+            item_based_recs.append(mid)
+            if len(item_based_recs) >= top_n:
+                break
+
+    final_recs = user_based_recs + item_based_recs
+    final_recs = final_recs[:top_n]
+    
+    if not final_recs:
+        return None, f"Your taste perfectly matches **{best_match_user}**! But they haven't liked anything you haven't already seen."
+
+    # Build the dataframe for recommendations
+    out = movies[movies["movieId"].isin(final_recs)][["movieId", "title", "genres"]].copy()
+    
+    # Map scores: give a high dummy score (e.g. 1.0) to the user-based ones to keep them at the top,
+    # and the actual cf_scores to the rest
+    def get_score(mid):
+        if mid in user_based_recs:
+            return 1.0 + best_match_score  # Ensure they stay at the very top
+        return cf_scores[movie_id_to_row[mid]]
+        
+    out["score"] = out["movieId"].map(get_score)
+    out = out.sort_values("score", ascending=False).head(top_n).reset_index(drop=True)
+    
+    explanation = f"💡 **Collaborative Effect:** We noticed your taste matches **{best_match_user}** (Similarity: {best_match_score*100:.0f}%). We've put their favorites at the top of your list!"
+    return out, explanation

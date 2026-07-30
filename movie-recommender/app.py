@@ -4,7 +4,7 @@ Run with: streamlit run app.py
 """
 import os
 
-import streamlit as st
+import streamlit as st  # type: ignore[missing-import]
 
 from data_loader import (
     load_data, build_genre_matrix, build_user_item_matrix, get_popular_movies,
@@ -76,24 +76,21 @@ poster_lookup = pipeline["poster_lookup"]
 if pipeline["tmdb_error"]:
     st.sidebar.warning(pipeline["tmdb_error"])
 
+if "local_profiles" not in st.session_state:
+    st.session_state.local_profiles = {
+        "User 1": [],
+        "User 2": [],
+        "User 3": [],
+        "User 4 (Target)": []
+    }
+if "current_user" not in st.session_state:
+    st.session_state.current_user = "User 1"
 if "liked_movie_ids" not in st.session_state:
-    st.session_state.liked_movie_ids = []
+    st.session_state.liked_movie_ids = st.session_state.local_profiles[st.session_state.current_user]
 if "selected_genres" not in st.session_state:
     st.session_state.selected_genres = []
-if "onboarded" not in st.session_state:
-    st.session_state.onboarded = False
 
 st.title(":clapper: Movie Recommender")
-
-# ---- Onboarding (cold start) ----
-if not st.session_state.onboarded:
-    st.subheader("Welcome! What do you like to watch?")
-    chosen = st.multiselect("Pick a few genres you enjoy", options=genre_names)
-    if st.button("Get my recommendations", disabled=not chosen):
-        st.session_state.selected_genres = chosen
-        st.session_state.onboarded = True
-        st.rerun()
-    st.stop()
 
 
 def render_recommendations(df, key_prefix, show_score=True, score_label="score"):
@@ -119,6 +116,23 @@ def render_recommendations(df, key_prefix, show_score=True, score_label="score")
 
 
 with st.sidebar:
+    st.write("### 👤 Select Local User")
+    st.caption("Switch users to simulate a collaborative environment.")
+    
+    selected_user = st.selectbox(
+        "Current User",
+        list(st.session_state.local_profiles.keys()),
+        index=list(st.session_state.local_profiles.keys()).index(st.session_state.current_user)
+    )
+    
+    if selected_user != st.session_state.current_user:
+        st.session_state.current_user = selected_user
+        # Point the shared liked_movie_ids to the newly selected user's list
+        st.session_state.liked_movie_ids = st.session_state.local_profiles[selected_user]
+        st.rerun()
+
+    st.divider()
+
     st.write("### Your liked movies")
     if st.session_state.liked_movie_ids:
         liked_titles = movies[movies["movieId"].isin(st.session_state.liked_movie_ids)]["title"]
@@ -126,7 +140,7 @@ with st.sidebar:
             st.write(f"- {t}")
     else:
         st.write("_None yet -- click Like on a recommendation._")
-    if st.button("Reset onboarding"):
+    if st.button("Reset all users"):
         st.session_state.clear()
         st.rerun()
 
@@ -141,6 +155,15 @@ with tab_home:
     c1.metric("Movies", f"{len(movies):,}")
     c2.metric("Ratings", f"{len(ratings):,}")
     c3.metric("Users", f"{ratings['userId'].nunique():,}")
+    
+    st.divider()
+    st.write("### What do you like to watch?")
+    st.session_state.selected_genres = st.multiselect(
+        "Pick a few genres you enjoy (Cold Start Preferences)", 
+        options=genre_names, 
+        default=st.session_state.selected_genres
+    )
+    
     st.caption(
         "Content-Based, Collaborative Filtering, and Hybrid tabs use TMDb-enriched TF-IDF features "
         "(overview/keywords/cast/director) when available, falling back to genre-only similarity otherwise."
@@ -178,12 +201,32 @@ with tab_cb:
     render_recommendations(recs, "cb")
 
 with tab_cf:
-    st.caption("Recommends movies liked by other users with similar taste to you (needs at least one Like).")
-    recs = collaborative_filtering.recommend(
-        movies, user_item_matrix, movie_ids, movie_id_to_row,
-        liked_movie_ids=st.session_state.liked_movie_ids, top_n=10,
-    )
-    render_recommendations(recs, "cf")
+    st.caption("Interactive Demo: Recommends movies liked by other Local Users with similar taste to you.")
+    
+    if not st.session_state.liked_movie_ids:
+        # If the user hasn't liked anything, we don't need to try and fail multiple times.
+        # Just pass None to trigger the standard popular movies fallback.
+        render_recommendations(None, "cf")
+    else:
+        recs, explanation = collaborative_filtering.recommend_user_based(
+            movies, user_item_matrix, movie_ids, movie_id_to_row,
+            current_user=st.session_state.current_user,
+            local_profiles=st.session_state.local_profiles, top_n=10
+        )
+        
+        if explanation:
+            st.info(explanation)
+            
+        if recs is not None and not recs.empty:
+            render_recommendations(recs, "cf")
+        else:
+            # Fall back to item-based if no user matches, or if we got None
+            st.warning("Falling back to standard Item-Based CF from the full dataset (no local users matched).")
+            recs_item_based = collaborative_filtering.recommend(
+                movies, user_item_matrix, movie_ids, movie_id_to_row,
+                liked_movie_ids=st.session_state.liked_movie_ids, top_n=10,
+            )
+            render_recommendations(recs_item_based, "cf")
 
 with tab_hy:
     st.caption("Blends the content-based and collaborative filtering scores.")
