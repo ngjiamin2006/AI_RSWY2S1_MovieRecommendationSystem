@@ -86,3 +86,37 @@ def predict_rating(user_item_matrix: csr_matrix, movie_id_to_row: dict, user_col
     if top_sims.sum() <= 0:
         return None
     return float(np.dot(top_sims, top_ratings) / top_sims.sum())
+
+
+def recommend_user_based(movies, user_item_matrix: csr_matrix, movie_ids: np.ndarray, movie_id_to_row: dict,
+                         current_user: str, local_profiles: dict, top_n: int = 10):
+    my_likes = set(local_profiles.get(current_user, []))
+    if not my_likes:
+        return None, "You haven't liked any movies yet."
+
+    # 1. Find best user match using Jaccard similarity
+    matches = [(u, set(l)) for u, l in local_profiles.items() if u != current_user and l]
+    scores = [(u, l, len(my_likes & l) / len(my_likes | l)) for u, l in matches]
+    best_u, best_l, best_score = max(scores, key=lambda x: x[2]) if scores else (None, set(), 0)
+
+    if best_score == 0:
+        return None, "No similar local users found yet."
+
+    # 2. Get user-based recs (movies they liked that I haven't seen)
+    user_recs = [m for m in best_l if m not in my_likes]
+
+    # 3. Get standard item-based recs to pad the list
+    base_df = recommend(movies, user_item_matrix, movie_ids, movie_id_to_row, list(my_likes), top_n=top_n)
+    item_recs = base_df["movieId"].tolist() if base_df is not None else []
+
+    # 4. Combine and deduplicate
+    final_recs = (user_recs + [m for m in item_recs if m not in user_recs])[:top_n]
+    if not final_recs:
+        return None, f"Your taste matches **{best_u}**, but no new movies to recommend!"
+
+    # 5. Build final dataframe
+    out = movies[movies["movieId"].isin(final_recs)][["movieId", "title", "genres"]].copy()
+    out["score"] = out["movieId"].map(lambda m: 2.0 if m in user_recs else 1.0)
+    
+    msg = f"💡 **Collaborative Effect:** Taste matches **{best_u}** ({best_score*100:.0f}%). Their favorites are at the top!"
+    return out.sort_values("score", ascending=False).reset_index(drop=True), msg
