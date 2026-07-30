@@ -203,25 +203,30 @@ with tab_cb:
 with tab_cf:
     st.caption("Interactive Demo: Recommends movies liked by other Local Users with similar taste to you.")
     
-    recs, explanation = collaborative_filtering.recommend_user_based(
-        movies, user_item_matrix, movie_ids, movie_id_to_row,
-        current_user=st.session_state.current_user,
-        local_profiles=st.session_state.local_profiles, top_n=10
-    )
-    
-    if explanation:
-        st.info(explanation)
-        
-    if recs is not None and not recs.empty:
-        render_recommendations(recs, "cf")
+    if not st.session_state.liked_movie_ids:
+        # If the user hasn't liked anything, we don't need to try and fail multiple times.
+        # Just pass None to trigger the standard popular movies fallback.
+        render_recommendations(None, "cf")
     else:
-        # Fall back to item-based if no user matches, or if we got None
-        st.warning("Falling back to standard Item-Based CF from the full dataset (no local users matched).")
-        recs_item_based = collaborative_filtering.recommend(
+        recs, explanation = collaborative_filtering.recommend_user_based(
             movies, user_item_matrix, movie_ids, movie_id_to_row,
-            liked_movie_ids=st.session_state.liked_movie_ids, top_n=10,
+            current_user=st.session_state.current_user,
+            local_profiles=st.session_state.local_profiles, top_n=10
         )
-        render_recommendations(recs_item_based, "cf")
+        
+        if explanation:
+            st.info(explanation)
+            
+        if recs is not None and not recs.empty:
+            render_recommendations(recs, "cf")
+        else:
+            # Fall back to item-based if no user matches, or if we got None
+            st.warning("Falling back to standard Item-Based CF from the full dataset (no local users matched).")
+            recs_item_based = collaborative_filtering.recommend(
+                movies, user_item_matrix, movie_ids, movie_id_to_row,
+                liked_movie_ids=st.session_state.liked_movie_ids, top_n=10,
+            )
+            render_recommendations(recs_item_based, "cf")
 
 with tab_hy:
     st.caption("Blends the content-based and collaborative filtering scores.")
