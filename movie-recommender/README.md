@@ -1,6 +1,6 @@
 # Movie Recommender — AI Assignment (Recommender System)
 
-Streamlit prototype for the Topic 3 group assignment. Dataset: [MovieLens ml-latest-small](https://grouplens.org/datasets/movielens/) (9,742 movies, 610 users, 100,836 ratings) — already downloaded into `data/`.
+Streamlit prototype for the Topic 3 group assignment. Dataset: [MovieLens ml-25m](https://grouplens.org/datasets/movielens/) (62,423 movies, 162,541 users, 25,000,095 ratings) — too large for git, download it separately and unzip into `data/ml-25m/` (see [grouplens.org/datasets/movielens](https://grouplens.org/datasets/movielens/)).
 
 ## Setup
 

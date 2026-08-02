@@ -20,10 +20,18 @@ import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from scipy.sparse import csr_matrix
 
+from algorithms.ranking import select_top_n
+
 
 def recommend(movies, user_item_matrix: csr_matrix, movie_ids: np.ndarray, movie_id_to_row: dict,
-                liked_movie_ids: list[int] | None = None, top_n: int = 10):
+              liked_movie_ids: list[int] | None = None, top_n: int = 10,
+              allowed_ids: set | None = None, pool_size: int | None = None, sample_seed: int | None = None):
     """Return top_n movies most similar to the user's liked movies.
+
+    `allowed_ids` restricts candidates to this set (e.g. a year-range
+    filter); `pool_size` + `sample_seed` turn a "Refresh" click into a
+    re-roll instead of the same deterministic list -- see
+    algorithms/ranking.py for details. Neither is used by evaluation.py.
 
     Returns a DataFrame with columns: movieId, title, genres, score
     or None if there isn't enough signal (caller should show a
@@ -41,15 +49,9 @@ def recommend(movies, user_item_matrix: csr_matrix, movie_ids: np.ndarray, movie
     scores = sims.mean(axis=0)  # average similarity to each liked movie
 
     exclude = set(liked_movie_ids)
-    order = np.argsort(-scores)
-    results = []
-    for idx in order:
-        mid = movie_ids[idx]
-        if mid in exclude or scores[idx] <= 0:
-            continue
-        results.append(mid)
-        if len(results) >= top_n:
-            break
+    positive_mask = scores > 0
+    candidate_allowed = set(movie_ids[positive_mask]) if allowed_ids is None else allowed_ids & set(movie_ids[positive_mask])
+    results = select_top_n(scores, movie_ids, exclude, candidate_allowed, top_n, pool_size, sample_seed)
 
     if not results:
         return None

@@ -5,10 +5,11 @@ evaluation.py, and any offline experiment notebooks.
 """
 import ast
 import os
+import re
 
 import numpy as np
 import pandas as pd
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, hstack
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import MultiLabelBinarizer
 
@@ -92,33 +93,71 @@ def build_user_item_matrix(ratings: pd.DataFrame, movie_ids: np.ndarray):
     return matrix, movie_id_to_row, user_id_to_col
 
 
-def get_popular_movies(movies: pd.DataFrame, ratings: pd.DataFrame, top_n: int = 10, min_ratings: int = 20):
+def get_popular_movies(movies: pd.DataFrame, ratings: pd.DataFrame, top_n: int = 10, min_ratings: int = 20,
+                        allowed_ids: set | None = None):
     """"Top Rated" -- highest average rating among movies with enough votes.
 
     Also used as the cold-start fallback when an algorithm has no signal yet.
+    `allowed_ids`, if given, restricts results to that set (e.g. a year-range
+    filter) so a fallback list doesn't silently ignore the user's filter.
     """
     stats = ratings.groupby("movieId")["rating"].agg(["mean", "count"])
     stats = stats[stats["count"] >= min_ratings]
+    if allowed_ids is not None:
+        stats = stats[stats.index.isin(allowed_ids)]
     top_ids = stats.sort_values(["mean", "count"], ascending=False).head(top_n).index
     result = movies[movies["movieId"].isin(top_ids)][["movieId", "title", "genres"]].copy()
     result["score"] = result["movieId"].map(stats["mean"])
     return result.sort_values("score", ascending=False).reset_index(drop=True)
 
 
-def get_most_rated_movies(movies: pd.DataFrame, ratings: pd.DataFrame, top_n: int = 10):
+def get_most_rated_movies(movies: pd.DataFrame, ratings: pd.DataFrame, top_n: int = 10,
+                           allowed_ids: set | None = None):
     """"Popular" -- highest rating COUNT (most-watched/most-discussed), regardless of average score."""
     counts = ratings.groupby("movieId")["rating"].agg(["mean", "count"])
+    if allowed_ids is not None:
+        counts = counts[counts.index.isin(allowed_ids)]
     top_ids = counts.sort_values("count", ascending=False).head(top_n).index
     result = movies[movies["movieId"].isin(top_ids)][["movieId", "title", "genres"]].copy()
     result["score"] = result["movieId"].map(counts["count"])
     return result.sort_values("score", ascending=False).reset_index(drop=True)
 
 
-def get_new_releases(movies_enriched: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
+def build_year_lookup(movies_enriched: pd.DataFrame) -> dict:
+    """Map movieId -> release year, for the Home/sidebar year-range filter.
+
+    Prefers TMDb's precise release_date; falls back to the year embedded in
+    the MovieLens title ("Toy Story (1995)") for movies with no TMDb match
+    (or when TMDb wasn't downloaded at all). Movies where neither source
+    yields a year are left out of the returned dict -- callers should treat
+    "no entry" as unknown, not as "excluded by the filter".
+    """
+    title_years = movies_enriched["title"].str.extract(r"\((\d{4})\)\s*$")[0]
+    title_years = pd.to_numeric(title_years, errors="coerce")
+
+    if "release_date" in movies_enriched.columns:
+        tmdb_years = pd.to_datetime(movies_enriched["release_date"], errors="coerce").dt.year
+        years = tmdb_years.combine_first(title_years)
+    else:
+        years = title_years
+
+    valid = years.dropna()
+    movie_ids = movies_enriched.loc[valid.index, "movieId"]
+    # Plain Python int, not numpy.int64 -- st.slider() rejects numpy scalar
+    # types for min_value/max_value/value, and this dict's values end up there.
+    return {int(mid): int(y) for mid, y in zip(movie_ids, valid)}
+
+
+def get_new_releases(movies_enriched: pd.DataFrame, top_n: int = 10, allowed_ids: set | None = None) -> pd.DataFrame:
     """"New Releases" -- sorted by TMDb release_date, which is far more precise
-    than parsing the year out of a MovieLens title string.
+    than parsing the year out of a MovieLens title string. `allowed_ids` (e.g.
+    a year-range filter) is applied before truncating to top_n, not after --
+    otherwise a narrow filter could wrongly empty out results that exist
+    further down the full sorted list.
     """
     valid = movies_enriched.dropna(subset=["release_date"]).copy()
+    if allowed_ids is not None:
+        valid = valid[valid["movieId"].isin(allowed_ids)]
     valid = valid.sort_values("release_date", ascending=False)
     return valid[["movieId", "title", "genres", "release_date", "poster_url"]].head(top_n).reset_index(drop=True)
 
@@ -214,17 +253,62 @@ def build_content_soup(movies_enriched: pd.DataFrame) -> pd.Series:
     return movies_enriched.apply(soup, axis=1)
 
 
-def build_tfidf_matrix(movies_enriched: pd.DataFrame, max_features: int = 5000):
-    """Vectorize the content soup with TF-IDF.
+class _FieldWeightedVectorizer:
+    """Combines the tag vectorizer (genres/keywords/cast/director) and the
+    overview vectorizer into one object callers can `.transform()` like a
+    single TfidfVectorizer, matching build_tfidf_matrix's combined matrix
+    column layout.
+
+    Only used to embed onboarding genre picks (see
+    algorithms/content_based.py's build_tfidf_profile) -- that's plain tag
+    text, never plot prose, so transform() only matches against the tag
+    vocabulary and leaves the overview block at zero.
+    """
+
+    def __init__(self, tag_vectorizer, overview_vocab_size, tag_weight):
+        self.tag_vectorizer = tag_vectorizer
+        self.overview_vocab_size = overview_vocab_size
+        self.tag_weight = tag_weight
+
+    def transform(self, texts):
+        tag_vec = self.tag_vectorizer.transform(texts) * self.tag_weight
+        overview_zeros = csr_matrix((tag_vec.shape[0], self.overview_vocab_size))
+        return hstack([tag_vec, overview_zeros]).tocsr()
+
+
+def build_tfidf_matrix(movies_enriched: pd.DataFrame, max_features: int = 5000,
+                        tag_weight: float = 0.7, overview_weight: float = 0.3):
+    """Vectorize movie content with TF-IDF, blending two weighted fields:
+    - tags: genres/keywords/cast/director (build_content_soup) -- short,
+      decisive tokens.
+    - overview: TMDb plot summary prose -- much larger vocabulary of
+      ordinary English words that would drown out the tag signal if merged
+      into one unweighted vectorizer, so it's vectorized separately (with
+      stopwords removed) and only contributes `overview_weight` of a row's
+      final vector, vs. `tag_weight` for the tags.
+
+    Both blocks are TF-IDF's default L2-normalized per row before scaling,
+    so the weights directly control each field's share of the cosine
+    similarity score downstream, regardless of overview length.
 
     Returns:
         movie_ids: array of movieId in row order matching `matrix`
-        matrix: sparse (n_movies, n_features) TF-IDF matrix
-        vectorizer: fitted TfidfVectorizer, reused to embed onboarding genre
-            picks into the same feature space (see algorithms/content_based.py)
+        matrix: sparse (n_movies, n_tag_features + n_overview_features) matrix
+        vectorizer: fitted _FieldWeightedVectorizer, reused to embed
+            onboarding genre picks into the same feature space (see
+            algorithms/content_based.py)
     """
-    soup = build_content_soup(movies_enriched)
-    vectorizer = TfidfVectorizer(max_features=max_features)
-    matrix = vectorizer.fit_transform(soup)
+    tag_soup = build_content_soup(movies_enriched)
+    tag_vectorizer = TfidfVectorizer(max_features=max_features)
+    tag_matrix = tag_vectorizer.fit_transform(tag_soup) * tag_weight
+
+    overview_text = movies_enriched["overview"].fillna("") if "overview" in movies_enriched.columns else pd.Series(
+        "", index=movies_enriched.index
+    )
+    overview_vectorizer = TfidfVectorizer(max_features=max_features, stop_words="english")
+    overview_matrix = overview_vectorizer.fit_transform(overview_text) * overview_weight
+
+    matrix = hstack([tag_matrix, overview_matrix]).tocsr()
+    vectorizer = _FieldWeightedVectorizer(tag_vectorizer, overview_matrix.shape[1], tag_weight)
     movie_ids = movies_enriched["movieId"].to_numpy()
     return movie_ids, matrix, vectorizer
