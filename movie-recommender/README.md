@@ -36,12 +36,13 @@ streamlit run app.py
 
 ## How the app is organized
 
-- `data_loader.py` — loads `movies.csv` / `ratings.csv`, builds the genre feature matrix and the sparse user-item ratings matrix. Shared by everyone, no Streamlit code here.
-- `algorithms/content_based.py` — **Member 1**: genre-similarity recommender. Also handles cold start (new user with no likes yet) using their onboarding genre picks.
-- `algorithms/collaborative_filtering.py` — **Member 2**: item-based collaborative filtering using rating similarity between movies. Has no cold-start ability by design — falls back to popularity list until the user has liked at least one movie (this is expected and worth mentioning in your report as a real limitation of CF).
-- `algorithms/hybrid.py` — **Member 3**: weighted combination of the two above.
-- `evaluation.py` — train/test split + precision/recall/F1@K (all three algorithms) + RMSE (collaborative filtering). Run directly (`python evaluation.py`) to get a metrics table for your documentation, independent of the UI.
-- `app.py` — the Streamlit UI: onboarding (genre picker) → tabs per algorithm with a Like button → Evaluation tab.
+- `data_loader.py` — loads MovieLens `ml-25m` + TMDb metadata, builds the genre matrix, TF-IDF matrix, and sparse user-item ratings matrix. Shared by everyone, no Streamlit code here.
+- `algorithms/content_based.py` — **Member 1**: genre one-hot baseline, plus a richer TF-IDF variant over TMDb overview/keywords/cast/director. Handles cold start via picked genres.
+- `algorithms/collaborative_filtering.py` — **Member 2**: item-based CF using rating similarity between movies, plus a local-user Jaccard-similarity variant (simulated multi-user demo). Item-based CF has no cold-start ability by design — falls back to a popularity list until the user has liked at least one movie (this is expected and worth mentioning in your report as a real limitation of CF).
+- `algorithms/hybrid.py` — **Member 3**: weighted combination of the two above, in both genre-only and TF-IDF flavors.
+- `algorithms/ranking.py` — shared top-N selection logic (year-range filtering, "Refresh" re-sampling) used by all three algorithm files.
+- `evaluation.py` — train/test split + precision/recall/F1@K (all three algorithms) + RMSE/MAE (collaborative filtering) + coverage/diversity/timing. Run directly (`python evaluation.py`) to get a metrics table for your documentation, independent of the UI.
+- `app.py` — the Streamlit UI: pick genres and/or like movies, then browse the Home, Popular, Top Rated, New Releases, Content-Based, Collaborative Filtering, and Hybrid tabs (posters, year filter, refresh, local-user switcher) and check the Evaluation tab for metrics.
 
 ## Suggested workflow per member
 
@@ -54,5 +55,5 @@ streamlit run app.py
 
 - [ ] Try each member's improvement ideas and re-evaluate.
 - [ ] Screenshot the Evaluation tab's table/chart for the Results & Discussion section of the documentation.
-- [ ] Note in the documentation that this is MovieLens data (not self-collected) and cite it properly (GroupLens Research, F. Maxwell Harper and Joseph A. Konstan. 2015. The MovieLens Datasets: History and Context.).
+- [ ] Note in the documentation that this uses MovieLens data (not self-collected) and cite it properly (GroupLens Research, F. Maxwell Harper and Joseph A. Konstan. 2015. The MovieLens Datasets: History and Context.), plus the required TMDb attribution ("This product uses the TMDB API but is not endorsed or certified by TMDB.").
 - [ ] Fill in the AI Disclosure Statement (Appendix B) using `AI_DISCLOSURE_LOG.md` — keep that log updated every time the code changes with further AI assistance.
