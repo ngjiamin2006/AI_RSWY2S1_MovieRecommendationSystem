@@ -11,10 +11,14 @@ This has a real cold-start limitation: a brand new user with zero
 likes has no signal here, so `recommend` returns None and the caller
 should fall back to a popularity list (see data_loader.get_popular_movies).
 
+Two implementations live here:
+- `recommend` -- the item-based baseline described above.
+- `recommend_user_based` -- a Jaccard-similarity user-based variant over
+  the app's simulated local user profiles, used by the CF tab's demo.
+
 Ideas for extending this beyond the baseline:
-- Try user-based CF instead of item-based and compare results.
 - Try matrix factorization (e.g. sklearn's TruncatedSVD on the
-    user-item matrix) instead of a similarity lookup.
+  user-item matrix) instead of a similarity lookup.
 """
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
