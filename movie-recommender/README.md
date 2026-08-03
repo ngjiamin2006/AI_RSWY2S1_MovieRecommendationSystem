@@ -1,6 +1,29 @@
 # Movie Recommender — AI Assignment (Recommender System)
 
-Streamlit prototype for the Topic 3 group assignment. Dataset: [MovieLens ml-25m](https://grouplens.org/datasets/movielens/) (62,423 movies, 162,541 users, 25,000,095 ratings) — too large for git, download it separately and unzip into `data/ml-25m/` (see [grouplens.org/datasets/movielens](https://grouplens.org/datasets/movielens/)).
+Streamlit prototype for the Topic 3 group assignment. Datasets: [MovieLens ml-25m](https://grouplens.org/datasets/movielens/) (62,423 movies, 162,541 users, 25,000,095 ratings) and TMDb metadata (overview/keywords/cast/director/posters). Both are too large for git — see **Data Setup** below.
+
+## Data Setup
+
+The app needs two things in place before it will run, neither of which is in this repo (both are gitignored — too big for GitHub, which hard-rejects any file over 100MB):
+
+```
+movie-recommender/
+└── data/
+    ├── tmdb/
+    │   └── movies_DB.csv
+    └── ml-25m/
+        ├── movies.csv
+        ├── ratings.csv
+        └── links.csv
+```
+
+**Easiest option: ask a team member for `movie-recommender-data.zip`** and extract it directly into your local `movie-recommender/` folder (same level as `app.py`) — it unpacks into exactly the structure above.
+
+**From scratch:**
+- MovieLens ml-25m: download [files.grouplens.org/datasets/movielens/ml-25m.zip](https://files.grouplens.org/datasets/movielens/ml-25m.zip) and unzip into `data/ml-25m/`.
+- TMDb `movies_DB.csv`: source not yet documented here — get it from a team member (via the data zip above) until this is filled in.
+
+Without TMDb data the app still runs (falls back to genre-only content-based, no posters); without MovieLens ml-25m it won't start at all.
 
 ## Setup
 
