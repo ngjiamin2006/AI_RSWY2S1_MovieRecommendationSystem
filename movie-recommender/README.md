@@ -25,6 +25,7 @@ movie-recommender/
 
 Without TMDb data the app still runs (falls back to genre-only content-based, no posters); without MovieLens ml-25m it won't start at all.
 
+
 ## Setup
 
 ```bash
