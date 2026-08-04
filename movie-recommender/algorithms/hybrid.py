@@ -14,12 +14,20 @@ Ideas for extending this beyond the baseline:
 import numpy as np
 
 from algorithms import content_based, collaborative_filtering
+from algorithms.ranking import select_top_n
 
 
 def recommend(movies, genre_matrix, movie_ids, movie_id_to_row, genre_names,
               user_item_matrix, liked_movie_ids: list[int] | None = None,
-              selected_genres: list[str] | None = None, top_n: int = 10, alpha: float = 0.5):
-    """alpha=1.0 -> pure content-based, alpha=0.0 -> pure collaborative filtering."""
+              selected_genres: list[str] | None = None, top_n: int = 10, alpha: float = 0.5,
+              allowed_ids: set | None = None, pool_size: int | None = None, sample_seed: int | None = None):
+    """alpha=1.0 -> pure content-based, alpha=0.0 -> pure collaborative filtering.
+
+    `allowed_ids` restricts candidates to this set (e.g. a year-range
+    filter); `pool_size` + `sample_seed` turn a "Refresh" click into a
+    re-roll instead of the same deterministic list -- see
+    algorithms/ranking.py for details. Neither is used by evaluation.py.
+    """
     from sklearn.metrics.pairwise import cosine_similarity
 
     cb_profile = content_based.build_user_profile(
@@ -41,15 +49,7 @@ def recommend(movies, genre_matrix, movie_ids, movie_id_to_row, genre_names,
     combined = alpha * normalize(cb_scores) + (1 - alpha) * normalize(cf_scores)
 
     exclude = set(liked_movie_ids or [])
-    order = np.argsort(-combined)
-    results = []
-    for idx in order:
-        mid = movie_ids[idx]
-        if mid in exclude:
-            continue
-        results.append(mid)
-        if len(results) >= top_n:
-            break
+    results = select_top_n(combined, movie_ids, exclude, allowed_ids, top_n, pool_size, sample_seed)
 
     if not results:
         return None
@@ -61,8 +61,12 @@ def recommend(movies, genre_matrix, movie_ids, movie_id_to_row, genre_names,
 
 def recommend_tfidf(movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer,
                      user_item_matrix, liked_movie_ids: list[int] | None = None,
-                     selected_genres: list[str] | None = None, top_n: int = 10, alpha: float = 0.5):
-    """Same blend as recommend(), but scoring content-based with the richer TF-IDF matrix."""
+                     selected_genres: list[str] | None = None, top_n: int = 10, alpha: float = 0.5,
+                     allowed_ids: set | None = None, pool_size: int | None = None, sample_seed: int | None = None):
+    """Same blend as recommend(), but scoring content-based with the richer TF-IDF matrix.
+
+    See recommend() above for what `allowed_ids`/`pool_size`/`sample_seed` do.
+    """
     from sklearn.metrics.pairwise import cosine_similarity
 
     cb_profile = content_based.build_tfidf_profile(
@@ -84,15 +88,7 @@ def recommend_tfidf(movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer
     combined = alpha * normalize(cb_scores) + (1 - alpha) * normalize(cf_scores)
 
     exclude = set(liked_movie_ids or [])
-    order = np.argsort(-combined)
-    results = []
-    for idx in order:
-        mid = movie_ids[idx]
-        if mid in exclude:
-            continue
-        results.append(mid)
-        if len(results) >= top_n:
-            break
+    results = select_top_n(combined, movie_ids, exclude, allowed_ids, top_n, pool_size, sample_seed)
 
     if not results:
         return None

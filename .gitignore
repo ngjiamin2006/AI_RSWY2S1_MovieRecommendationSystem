@@ -18,3 +18,4 @@ Thumbs.db
 # Large datasets (download separately, see README) -- too big for git
 movie-recommender/data/ml-25m/
 movie-recommender/data/tmdb/
+movie-recommender-data.zip

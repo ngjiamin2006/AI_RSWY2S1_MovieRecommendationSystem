@@ -11,19 +11,31 @@ This has a real cold-start limitation: a brand new user with zero
 likes has no signal here, so `recommend` returns None and the caller
 should fall back to a popularity list (see data_loader.get_popular_movies).
 
+Two implementations live here:
+- `recommend` -- the item-based baseline described above.
+- `recommend_user_based` -- a Jaccard-similarity user-based variant over
+  the app's simulated local user profiles, used by the CF tab's demo.
+
 Ideas for extending this beyond the baseline:
-- Try user-based CF instead of item-based and compare results.
 - Try matrix factorization (e.g. sklearn's TruncatedSVD on the
-    user-item matrix) instead of a similarity lookup.
+  user-item matrix) instead of a similarity lookup.
 """
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from scipy.sparse import csr_matrix
 
+from algorithms.ranking import select_top_n
+
 
 def recommend(movies, user_item_matrix: csr_matrix, movie_ids: np.ndarray, movie_id_to_row: dict,
-                liked_movie_ids: list[int] | None = None, top_n: int = 10):
+              liked_movie_ids: list[int] | None = None, top_n: int = 10,
+              allowed_ids: set | None = None, pool_size: int | None = None, sample_seed: int | None = None):
     """Return top_n movies most similar to the user's liked movies.
+
+    `allowed_ids` restricts candidates to this set (e.g. a year-range
+    filter); `pool_size` + `sample_seed` turn a "Refresh" click into a
+    re-roll instead of the same deterministic list -- see
+    algorithms/ranking.py for details. Neither is used by evaluation.py.
 
     Returns a DataFrame with columns: movieId, title, genres, score
     or None if there isn't enough signal (caller should show a
@@ -41,15 +53,9 @@ def recommend(movies, user_item_matrix: csr_matrix, movie_ids: np.ndarray, movie
     scores = sims.mean(axis=0)  # average similarity to each liked movie
 
     exclude = set(liked_movie_ids)
-    order = np.argsort(-scores)
-    results = []
-    for idx in order:
-        mid = movie_ids[idx]
-        if mid in exclude or scores[idx] <= 0:
-            continue
-        results.append(mid)
-        if len(results) >= top_n:
-            break
+    positive_mask = scores > 0
+    candidate_allowed = set(movie_ids[positive_mask]) if allowed_ids is None else allowed_ids & set(movie_ids[positive_mask])
+    results = select_top_n(scores, movie_ids, exclude, candidate_allowed, top_n, pool_size, sample_seed)
 
     if not results:
         return None

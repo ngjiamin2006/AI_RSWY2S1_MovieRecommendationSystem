@@ -16,10 +16,11 @@ Two parallel implementations live here on purpose, both kept working:
 
 Ideas for extending this further:
 - Weight recently liked movies more than earlier ones.
-- Blend overview text (currently unused) in as its own TF-IDF field.
 """
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
+
+from algorithms.ranking import select_top_n
 
 
 def build_user_profile(genre_matrix: np.ndarray, movie_id_to_row: dict, liked_movie_ids: list[int] | None,
@@ -47,8 +48,14 @@ def build_user_profile(genre_matrix: np.ndarray, movie_id_to_row: dict, liked_mo
 
 def recommend(movies, genre_matrix: np.ndarray, movie_ids: np.ndarray, movie_id_to_row: dict,
               genre_names: list[str], liked_movie_ids: list[int] | None = None,
-              selected_genres: list[str] | None = None, top_n: int = 10):
+              selected_genres: list[str] | None = None, top_n: int = 10,
+              allowed_ids: set | None = None, pool_size: int | None = None, sample_seed: int | None = None):
     """Return top_n movies most similar to the user's profile.
+
+    `allowed_ids` restricts candidates to this set (e.g. a year-range
+    filter); `pool_size` + `sample_seed` turn a "Refresh" click into a
+    re-roll instead of the same deterministic list -- see
+    algorithms/ranking.py for details. Neither is used by evaluation.py.
 
     Returns a DataFrame with columns: movieId, title, genres, score
     """
@@ -58,16 +65,7 @@ def recommend(movies, genre_matrix: np.ndarray, movie_ids: np.ndarray, movie_id_
 
     scores = cosine_similarity(profile, genre_matrix)[0]
     exclude = set(liked_movie_ids or [])
-
-    order = np.argsort(-scores)
-    results = []
-    for idx in order:
-        mid = movie_ids[idx]
-        if mid in exclude:
-            continue
-        results.append(mid)
-        if len(results) >= top_n:
-            break
+    results = select_top_n(scores, movie_ids, exclude, allowed_ids, top_n, pool_size, sample_seed)
 
     out = movies[movies["movieId"].isin(results)][["movieId", "title", "genres"]].copy()
     out["score"] = out["movieId"].map(lambda mid: scores[movie_id_to_row[mid]])
@@ -99,24 +97,19 @@ def build_tfidf_profile(tfidf_matrix, movie_id_to_row: dict, liked_movie_ids: li
 
 def recommend_tfidf(movies, tfidf_matrix, movie_ids: np.ndarray, movie_id_to_row: dict,
                      vectorizer=None, liked_movie_ids: list[int] | None = None,
-                     selected_genres: list[str] | None = None, top_n: int = 10):
-    """Same ranking logic as recommend(), scored against the richer TF-IDF content matrix."""
+                     selected_genres: list[str] | None = None, top_n: int = 10,
+                     allowed_ids: set | None = None, pool_size: int | None = None, sample_seed: int | None = None):
+    """Same ranking logic as recommend(), scored against the richer TF-IDF content matrix.
+
+    See recommend() above for what `allowed_ids`/`pool_size`/`sample_seed` do.
+    """
     profile = build_tfidf_profile(tfidf_matrix, movie_id_to_row, liked_movie_ids, vectorizer, selected_genres)
     if profile is None:
         return None
 
     scores = cosine_similarity(profile, tfidf_matrix)[0]
     exclude = set(liked_movie_ids or [])
-
-    order = np.argsort(-scores)
-    results = []
-    for idx in order:
-        mid = movie_ids[idx]
-        if mid in exclude:
-            continue
-        results.append(mid)
-        if len(results) >= top_n:
-            break
+    results = select_top_n(scores, movie_ids, exclude, allowed_ids, top_n, pool_size, sample_seed)
 
     out = movies[movies["movieId"].isin(results)][["movieId", "title", "genres"]].copy()
     out["score"] = out["movieId"].map(lambda mid: scores[movie_id_to_row[mid]])
