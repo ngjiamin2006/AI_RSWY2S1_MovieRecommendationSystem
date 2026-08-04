@@ -16,29 +16,119 @@ st.set_page_config(page_title="Movie Recommender", layout="wide")
 
 st.markdown("""
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap');
+
+/* Apply Inter font globally */
+html, body, [class*="css"]  {
+    font-family: 'Inter', sans-serif !important;
+}
+
 /* Remove top padding for a more immersive feel */
 .block-container {
     padding-top: 2rem;
     padding-bottom: 2rem;
 }
 
-/* Add a slight zoom effect when hovering over the cards */
-div[data-testid="column"] {
-    transition: transform 0.2s ease-in-out;
+/* Gradient Title */
+h1 {
+    background: -webkit-linear-gradient(45deg, #6366f1, #a855f7);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    font-weight: 800 !important;
+    padding-bottom: 10px;
 }
-div[data-testid="column"]:hover {
-    transform: scale(1.03);
+
+/* Style the Tabs to look sleek */
+button[data-baseweb="tab"] {
+    background-color: transparent !important;
+    border: none !important;
+    color: #94a3b8 !important;
+    font-size: 1rem !important;
+    font-weight: 600 !important;
+}
+button[data-baseweb="tab"][aria-selected="true"] {
+    color: #E2E8F0 !important;
+    border-bottom: 2px solid #6366f1 !important;
+}
+
+/* Make Tabs sticky (Always on top) */
+div[data-testid="stTabs"] > div:first-of-type,
+div[data-baseweb="tab-list"],
+div[role="tablist"] {
+    position: -webkit-sticky !important;
+    position: sticky !important;
+    top: 0px !important; /* Set to 0px to ensure it sticks to the very top */
+    background-color: rgba(11, 15, 25, 0.98) !important; 
+    backdrop-filter: blur(10px) !important;
+    z-index: 999999 !important;
+    padding-top: 15px !important;
+    padding-bottom: 5px !important;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
+}
+
+/* Fix Streamlit parent overflow which breaks position: sticky */
+.block-container, [data-testid="stVerticalBlock"], [data-testid="stVerticalBlockBorderWrapper"], [data-testid="stAppViewBlockContainer"] {
+    overflow: visible !important;
+}
+
+/* Input Fields (Search, numbers) */
+input {
+    background-color: #1a202c !important;
+    border: 1px solid #2d3748 !important;
+    color: white !important;
+    border-radius: 8px !important;
+}
+input:focus {
+    border-color: #6366f1 !important;
+    box-shadow: 0 0 0 1px #6366f1 !important;
+}
+
+/* Metric Boxes */
+div[data-testid="metric-container"] {
+    background-color: rgba(21, 26, 38, 0.7);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    padding: 15px;
+    border-radius: 12px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+}
+
+/* Target ONLY the movie columns using the :has selector so checkboxes and metrics aren't distorted */
+div[data-testid="column"]:has(.movie-poster-card) {
+    background-color: rgba(21, 26, 38, 0.7);
+    padding: 15px;
+    border-radius: 16px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.4);
+    transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+/* Hover effect ONLY on movie cards */
+div[data-testid="column"]:has(.movie-poster-card):hover {
+    transform: translateY(-5px);
+    box-shadow: 0 12px 24px rgba(99, 102, 241, 0.15);
+    border: 1px solid rgba(99, 102, 241, 0.3);
 }
 
 /* Give posters rounded corners and shadow */
 img {
-    border-radius: 10px;
-    box-shadow: 0 4px 8px rgba(0,0,0,0.4);
+    border-radius: 12px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
 }
 
-/* Customize buttons to look more cinematic */
-button {
-    font-weight: bold !important;
+/* Sleek buttons */
+div.stButton > button:first-child {
+    background: rgba(99, 102, 241, 0.1);
+    border: 1px solid rgba(99, 102, 241, 0.4);
+    color: #E2E8F0;
+    border-radius: 8px;
+    font-weight: 600;
+    transition: all 0.2s ease-in-out;
+}
+div.stButton > button:first-child:hover {
+    background: rgba(99, 102, 241, 0.8);
+    border: 1px solid #6366f1;
+    color: white;
+    transform: scale(1.02);
 }
 </style>
 """, unsafe_allow_html=True)
@@ -167,19 +257,19 @@ def render_recommendations(df, key_prefix, show_score=True, score_label="score")
                 
                 if isinstance(poster, str) and poster.strip() != "":
                     st.markdown(
-                        f'<div style="height:350px; margin-bottom:10px;">'
-                        f'<img src="{poster}" style="width:100%; height:100%; object-fit:cover; border-radius:10px; box-shadow:0 4px 8px rgba(0,0,0,0.4);">'
+                        f'<div class="movie-poster-card" style="height:350px; margin-bottom:12px;">'
+                        f'<img src="{poster}" style="width:100%; height:100%; object-fit:cover; border-radius:12px; box-shadow:0 4px 12px rgba(0,0,0,0.5);">'
                         f'</div>',
                         unsafe_allow_html=True
                     )
                 else:
                     # Dynamic text-based fallback poster using a nice gradient and the movie title
                     st.markdown(
-                        f'<div style="height:350px; display:flex; align-items:center; justify-content:center; '
-                        f'background: linear-gradient(135deg, #2b2b2b, #1a1a1a); border-radius:10px; '
-                        f'margin-bottom:10px; box-shadow:0 4px 8px rgba(0,0,0,0.4); padding: 15px; text-align: center;">'
-                        f'<span style="color: #666; font-size: 1.2rem; font-weight: bold; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;">'
-                        f'<br><br>{title}</span></div>', 
+                        f'<div class="movie-poster-card" style="height:350px; display:flex; align-items:center; justify-content:center; '
+                        f'background: linear-gradient(135deg, #1A202C, #0f131c); border-radius:12px; '
+                        f'margin-bottom:12px; box-shadow:0 4px 12px rgba(0,0,0,0.5); padding: 15px; text-align: center; border: 1px solid rgba(255,255,255,0.02);">'
+                        f'<span style="color: #94a3b8; font-size: 1.2rem; font-weight: 600; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;">'
+                        f'{title}</span></div>', 
                         unsafe_allow_html=True
                     )
                 
