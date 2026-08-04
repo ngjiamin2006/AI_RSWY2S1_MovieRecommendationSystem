@@ -14,6 +14,35 @@ import evaluation
 
 st.set_page_config(page_title="Movie Recommender", layout="wide")
 
+st.markdown("""
+<style>
+/* Remove top padding for a more immersive feel */
+.block-container {
+    padding-top: 2rem;
+    padding-bottom: 2rem;
+}
+
+/* Add a slight zoom effect when hovering over the cards */
+div[data-testid="column"] {
+    transition: transform 0.2s ease-in-out;
+}
+div[data-testid="column"]:hover {
+    transform: scale(1.03);
+}
+
+/* Give posters rounded corners and shadow */
+img {
+    border-radius: 10px;
+    box-shadow: 0 4px 8px rgba(0,0,0,0.4);
+}
+
+/* Customize buttons to look more cinematic */
+button {
+    font-weight: bold !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 TMDB_ATTRIBUTION = "This product uses the TMDB API but is not endorsed or certified by TMDB."
 DATASET = "ml-25m"
 
@@ -86,9 +115,10 @@ year_bounds = (known_years[0], known_years[-1]) if known_years else (1900, 2025)
 
 with st.sidebar:
     st.write("### Filter by year")
-    year_range = st.slider(
-        "Release year range", min_value=year_bounds[0], max_value=year_bounds[1], value=year_bounds
-    )
+    col1, col2 = st.columns(2)
+    min_yr = col1.number_input("From", min_value=year_bounds[0], max_value=year_bounds[1], value=year_bounds[0], step=1)
+    max_yr = col2.number_input("To", min_value=year_bounds[0], max_value=year_bounds[1], value=year_bounds[1], step=1)
+    year_range = (int(min_yr), int(max_yr))
 
 # Only treat this as an active filter once the user narrows it -- at the
 # full default range, filtering by year_lookup would also silently exclude
@@ -107,7 +137,7 @@ if "liked_movie_ids" not in st.session_state:
 if "selected_genres" not in st.session_state:
     st.session_state.selected_genres = []
 
-st.title(":clapper: Movie Recommender")
+st.title("Movie Recommender")
 
 
 def render_recommendations(df, key_prefix, show_score=True, score_label="score"):
@@ -123,22 +153,73 @@ def render_recommendations(df, key_prefix, show_score=True, score_label="score")
         if df.empty:
             st.warning("No movies at all in this year range -- widen it in the sidebar.")
             return
-    for _, row in df.iterrows():
-        cols = st.columns([1, 5, 2, 1])
-        poster = poster_lookup.get(row["movieId"])
-        if isinstance(poster, str):
-            cols[0].image(poster, width=70)
-        else:
-            cols[0].write(":clapper:")
-        cols[1].write(f"**{row['title']}**  \n{row['genres']}")
-        if show_score and "score" in row:
-            cols[2].write(f"{score_label}: {row['score']:.3f}")
-        elif "release_date" in row:
-            cols[2].write(str(row["release_date"]))
-        if cols[3].button(":+1: Like", key=f"{key_prefix}_{row['movieId']}"):
-            if row["movieId"] not in st.session_state.liked_movie_ids:
-                st.session_state.liked_movie_ids.append(row["movieId"])
-            st.rerun()
+            
+    cols_per_row = 5
+    
+    for i in range(0, len(df), cols_per_row):
+        cols = st.columns(cols_per_row)
+        chunk = df.iloc[i:i+cols_per_row]
+        
+        for col, (_, row) in zip(cols, chunk.iterrows()):
+            with col:
+                poster = poster_lookup.get(row["movieId"])
+                title = row['title'] # we need title early for the fallback poster
+                
+                if isinstance(poster, str) and poster.strip() != "":
+                    st.markdown(
+                        f'<div style="height:350px; margin-bottom:10px;">'
+                        f'<img src="{poster}" style="width:100%; height:100%; object-fit:cover; border-radius:10px; box-shadow:0 4px 8px rgba(0,0,0,0.4);">'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
+                else:
+                    # Dynamic text-based fallback poster using a nice gradient and the movie title
+                    st.markdown(
+                        f'<div style="height:350px; display:flex; align-items:center; justify-content:center; '
+                        f'background: linear-gradient(135deg, #2b2b2b, #1a1a1a); border-radius:10px; '
+                        f'margin-bottom:10px; box-shadow:0 4px 8px rgba(0,0,0,0.4); padding: 15px; text-align: center;">'
+                        f'<span style="color: #666; font-size: 1.2rem; font-weight: bold; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;">'
+                        f'<br><br>{title}</span></div>', 
+                        unsafe_allow_html=True
+                    )
+                
+                score_str = ""
+                if show_score and "score" in row:
+                    # Using title() in case score_label is lowercase
+                    label = score_label.title()
+                    # If it's a count (like number of ratings), format as integer, else as a 2-decimal float
+                    if label.lower() == "ratings" or "count" in label.lower():
+                        score_str = f"Total Reviews: {int(row['score']):,}"
+                    else:
+                        score_str = f"{label}: {row['score']:.2f}/5.0"
+                elif "release_date" in row:
+                    score_str = f"Released: {row['release_date']}"
+                
+                genres = str(row['genres']).split('|')
+                genre_str = ""
+                if genres and genres[0] != 'nan':
+                    genre_str = f"{', '.join(genres[:2])}"
+                
+                # Use a fixed-height container to ensure all cards are identical in height
+                # margin-top: auto pushes the info block to the bottom, aligning it with the button
+                st.markdown(
+                    f'<div style="height: 100px; display: flex; flex-direction: column; margin-bottom: 10px;">'
+                    f'<strong style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-overflow: ellipsis; font-size: 1rem; line-height: 1.2;">'
+                    f'{title}</strong>'
+                    f'<div style="margin-top: auto;">'
+                    f'<div style="color: #a0a0a0; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">'
+                    f'{score_str}</div>'
+                    f'<div style="color: #a0a0a0; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">'
+                    f'{genre_str}</div>'
+                    f'</div>'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
+                
+                if st.button("Like", key=f"{key_prefix}_{row['movieId']}", use_container_width=True):
+                    if row["movieId"] not in st.session_state.liked_movie_ids:
+                        st.session_state.liked_movie_ids.append(row["movieId"])
+                    st.rerun()
 
 
 def refresh_controls(key_prefix):
@@ -151,7 +232,7 @@ def refresh_controls(key_prefix):
     """
     state_key = f"{key_prefix}_refresh_count"
     st.session_state.setdefault(state_key, 0)
-    if st.button(":arrows_counterclockwise: Refresh", key=f"{key_prefix}_refresh_btn"):
+    if st.button("Refresh", key=f"{key_prefix}_refresh_btn"):
         st.session_state[state_key] += 1
         st.rerun()
     count = st.session_state[state_key]
@@ -159,7 +240,7 @@ def refresh_controls(key_prefix):
 
 
 with st.sidebar:
-    st.write("### 👤 Select Local User")
+    st.write("### Select Local User")
     st.caption("Switch users to simulate a collaborative environment.")
     
     selected_user = st.selectbox(
@@ -200,12 +281,34 @@ with tab_home:
     c3.metric("Users", f"{ratings['userId'].nunique():,}")
     
     st.divider()
+    
+    st.write("### Search Movies")
+    search_query = st.text_input("Enter movie title...", placeholder="e.g. Inception or Toy Story")
+    if search_query:
+        search_results = movies[movies['title'].str.contains(search_query, case=False, na=False)].head(20)
+        if search_results.empty:
+            st.warning(f"No movies found matching '{search_query}'.")
+        else:
+            st.success(f"Found {len(search_results)} movies. Click 'Like' to add them to your profile.")
+            render_recommendations(search_results, "search", show_score=False)
+    else:
+        st.info("Type a movie name above to search for specific movies to like.")
+    
+    st.divider()
     st.write("### What do you like to watch?")
-    st.session_state.selected_genres = st.multiselect(
-        "Pick a few genres you enjoy (Cold Start Preferences)", 
-        options=genre_names, 
-        default=st.session_state.selected_genres
-    )
+    st.caption("Pick a few genres you enjoy (Cold Start Preferences).")
+    
+    # Genre Checkbox Grid
+    genre_cols = st.columns(4)
+    new_selected_genres = []
+    
+    for i, g in enumerate(genre_names):
+        with genre_cols[i % 4]:
+            is_checked = st.checkbox(g, value=(g in st.session_state.selected_genres))
+            if is_checked:
+                new_selected_genres.append(g)
+                
+    st.session_state.selected_genres = new_selected_genres
     
     st.caption(
         "Content-Based, Collaborative Filtering, and Hybrid tabs use TMDb-enriched TF-IDF features "

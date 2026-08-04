@@ -38,7 +38,10 @@ source venv/bin/activate     # macOS/Linux
 pip install -r requirements.txt
 
 # launch the app
-streamlit run app.py
+1. cd movie-recommender
+2. python -m venv venv
+3. venv\Scripts\activate
+4. streamlit run app.py
 ```
 
 This opens the app in your browser (default `http://localhost:8501`). Pick a few favorite genres and/or like some recommendations, then browse each algorithm's tab (posters, year filter, refresh button) and check the **Evaluation** tab for metrics.
