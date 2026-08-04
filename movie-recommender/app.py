@@ -19,13 +19,13 @@ st.markdown("""
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap');
 
 /* Apply Inter font globally */
-html, body, [class*="css"]  {
+html, body, [class*="css"]  {   
     font-family: 'Inter', sans-serif !important;
 }
 
-/* Remove top padding for a more immersive feel */
+/* Adjust top padding to prevent content from hiding under the top header */
 .block-container {
-    padding-top: 2rem;
+    padding-top: 4rem;
     padding-bottom: 2rem;
 }
 
@@ -349,9 +349,21 @@ with st.sidebar:
 
     st.write("### Your liked movies")
     if st.session_state.liked_movie_ids:
-        liked_titles = movies[movies["movieId"].isin(st.session_state.liked_movie_ids)]["title"]
-        for t in liked_titles:
-            st.write(f"- {t}")
+        liked_data = movies[movies["movieId"].isin(st.session_state.liked_movie_ids)]
+        for _, row in liked_data.iterrows():
+            c1, c2 = st.columns([5, 1])
+            title = row["title"]
+            genres = str(row["genres"]).replace("|", ", ") if "genres" in row and str(row["genres"]) != "nan" else ""
+            
+            with c1:
+                if genres:
+                    st.markdown(f"**{title}**<br><span style='color: #a0a0a0; font-size: 0.85em;'>{genres}</span>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"**{title}**", unsafe_allow_html=True)
+            with c2:
+                if st.button("❌", key=f"remove_{row['movieId']}", help="Remove movie"):
+                    st.session_state.liked_movie_ids.remove(row["movieId"])
+                    st.rerun()
     else:
         st.write("_None yet -- click Like on a recommendation._")
     if st.button("Reset all users"):
