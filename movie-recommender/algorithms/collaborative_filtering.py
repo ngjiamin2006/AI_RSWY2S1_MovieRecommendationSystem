@@ -79,6 +79,11 @@ def recommend_user_based(_movies, _user_item_matrix: csr_matrix, _movie_ids: np.
             continue
             
         their_set = set(their_likes)
+        
+        # Skip this user if they don't have any movies I haven't already seen
+        if not (their_set - my_set):
+            continue
+            
         intersection = len(my_set & their_set)
         union = len(my_set | their_set)
         jaccard = intersection / union if union > 0 else 0

@@ -195,7 +195,7 @@ if "local_profiles" not in st.session_state:
         "User 1": [],
         "User 2": [],
         "User 3": [],
-        "User 4 (Target)": []
+        "User 4": []
     }
 if "current_user" not in st.session_state:
     st.session_state.current_user = "User 1"
@@ -229,6 +229,12 @@ if "selected_genres" not in st.session_state:
 
 st.title("Movie Recommender")
 
+
+def add_like(movie_id):
+    if movie_id not in st.session_state.liked_movie_ids:
+        st.session_state.liked_movie_ids.append(movie_id)
+        st.toast("Movie liked! Updating algorithms in the background...", icon="🔄")
+        st.session_state.just_liked = True
 
 def render_recommendations(df, key_prefix, show_score=True, score_label="score"):
     if df is None or df.empty:
@@ -306,9 +312,22 @@ def render_recommendations(df, key_prefix, show_score=True, score_label="score")
                     unsafe_allow_html=True
                 )
                 
-                if st.button("Like", key=f"{key_prefix}_{row['movieId']}", use_container_width=True):
-                    if row["movieId"] not in st.session_state.liked_movie_ids:
-                        st.session_state.liked_movie_ids.append(row["movieId"])
+                is_liked = row["movieId"] in st.session_state.liked_movie_ids
+                if is_liked:
+                    st.button(
+                        "Liked",
+                        key=f"{key_prefix}_{row['movieId']}",
+                        use_container_width=True,
+                        disabled=True
+                    )
+                else:
+                    st.button(
+                        "Like",
+                        key=f"{key_prefix}_{row['movieId']}",
+                        use_container_width=True,
+                        on_click=add_like,
+                        args=(row["movieId"],)
+                    )
 
 
 def refresh_controls(key_prefix):
@@ -543,7 +562,13 @@ with st.sidebar:
             with c2:
                 if st.button("❌", key=f"remove_{row['movieId']}", help="Remove movie"):
                     st.session_state.liked_movie_ids.remove(row["movieId"])
+                    st.rerun()
     else:
         st.write("_None yet -- click Like on a recommendation._")
     if st.button("Reset all users"):
         st.session_state.clear()
+        st.rerun()
+
+if st.session_state.get("just_liked", False):
+    st.toast("Update complete! Your recommendations are ready.", icon="✅")
+    st.session_state.just_liked = False
