@@ -1,77 +1,43 @@
-"""Item-based collaborative filtering recommender.
-
-OWNER: Member 2
-Idea: two movies are "similar" if the same users rated them similarly,
-regardless of genre. We never build the full (movies x movies)
-similarity matrix up front (it would be ~9700x9700 -- too much memory
-for a class laptop); instead we compute similarity only between the
-user's liked movies and the rest, on demand, using sparse matrix ops.
-
-This has a real cold-start limitation: a brand new user with zero
-likes has no signal here, so `recommend` returns None and the caller
-should fall back to a popularity list (see data_loader.get_popular_movies).
-
-Two implementations live here:
-- `recommend` -- the item-based baseline described above.
-- `recommend_user_based` -- a Jaccard-similarity user-based variant over
-  the app's simulated local user profiles, used by the CF tab's demo.
-
-Ideas for extending this beyond the baseline:
-- Try matrix factorization (e.g. sklearn's TruncatedSVD on the
-  user-item matrix) instead of a similarity lookup.
-"""
 import numpy as np
+import streamlit as st
 from sklearn.metrics.pairwise import cosine_similarity
 from scipy.sparse import csr_matrix
 
 from algorithms.ranking import select_top_n
 
 
-def recommend(movies, user_item_matrix: csr_matrix, movie_ids: np.ndarray, movie_id_to_row: dict,
+@st.cache_data(show_spinner=False)
+def recommend(_movies, _user_item_matrix: csr_matrix, _movie_ids: np.ndarray, _movie_id_to_row: dict,
               liked_movie_ids: list[int] | None = None, top_n: int = 10,
               allowed_ids: set | None = None, pool_size: int | None = None, sample_seed: int | None = None):
-    """Return top_n movies most similar to the user's liked movies.
 
-    `allowed_ids` restricts candidates to this set (e.g. a year-range
-    filter); `pool_size` + `sample_seed` turn a "Refresh" click into a
-    re-roll instead of the same deterministic list -- see
-    algorithms/ranking.py for details. Neither is used by evaluation.py.
-
-    Returns a DataFrame with columns: movieId, title, genres, score
-    or None if there isn't enough signal (caller should show a
-    popularity-based fallback list instead).
-    """
     if not liked_movie_ids:
         return None
 
-    liked_rows = [movie_id_to_row[mid] for mid in liked_movie_ids if mid in movie_id_to_row]
+    liked_rows = [_movie_id_to_row[mid] for mid in liked_movie_ids if mid in _movie_id_to_row]
     if not liked_rows:
         return None
 
-    liked_vectors = user_item_matrix[liked_rows]  # (n_liked, n_users)
-    sims = cosine_similarity(liked_vectors, user_item_matrix)  # (n_liked, n_movies)
+    liked_vectors = _user_item_matrix[liked_rows]  # (n_liked, n_users)
+    sims = cosine_similarity(liked_vectors, _user_item_matrix)  # (n_liked, n_movies)
     scores = sims.mean(axis=0)  # average similarity to each liked movie
 
     exclude = set(liked_movie_ids)
     positive_mask = scores > 0
-    candidate_allowed = set(movie_ids[positive_mask]) if allowed_ids is None else allowed_ids & set(movie_ids[positive_mask])
-    results = select_top_n(scores, movie_ids, exclude, candidate_allowed, top_n, pool_size, sample_seed)
+    candidate_allowed = set(_movie_ids[positive_mask]) if allowed_ids is None else allowed_ids & set(_movie_ids[positive_mask])
+    results = select_top_n(scores, _movie_ids, exclude, candidate_allowed, top_n, pool_size, sample_seed)
 
     if not results:
         return None
 
-    out = movies[movies["movieId"].isin(results)][["movieId", "title", "genres"]].copy()
-    out["score"] = out["movieId"].map(lambda mid: scores[movie_id_to_row[mid]])
+    out = _movies[_movies["movieId"].isin(results)][["movieId", "title", "genres"]].copy()
+    out["score"] = out["movieId"].map(lambda mid: scores[_movie_id_to_row[mid]])
     return out.sort_values("score", ascending=False).reset_index(drop=True)
 
 
 def predict_rating(user_item_matrix: csr_matrix, movie_id_to_row: dict, user_col: int,
                     target_movie_id: int, k: int = 20) -> float | None:
-    """Predict what a user would rate target_movie_id, used by evaluation.py for RMSE.
 
-    Weighted average of the user's ratings on the k most similar movies
-    to the target, weighted by item-item similarity.
-    """
     if target_movie_id not in movie_id_to_row:
         return None
     target_row = movie_id_to_row[target_movie_id]
@@ -94,8 +60,9 @@ def predict_rating(user_item_matrix: csr_matrix, movie_id_to_row: dict, user_col
     return float(np.dot(top_sims, top_ratings) / top_sims.sum())
 
 
-def recommend_user_based(movies, user_item_matrix: csr_matrix, movie_ids: np.ndarray, movie_id_to_row: dict,
-                         current_user: str, local_profiles: dict, top_n: int = 10):
+@st.cache_data(show_spinner=False)
+def recommend_user_based(_movies, _user_item_matrix: csr_matrix, _movie_ids: np.ndarray, _movie_id_to_row: dict,
+                            current_user: str, local_profiles: dict, top_n: int = 10):
     my_likes = set(local_profiles.get(current_user, []))
     if not my_likes:
         return None, "You haven't liked any movies yet. Like some movies to see collaborative recommendations!"
@@ -112,6 +79,11 @@ def recommend_user_based(movies, user_item_matrix: csr_matrix, movie_ids: np.nda
             continue
             
         their_set = set(their_likes)
+        
+        # Skip this user if they don't have any movies I haven't already seen
+        if not (their_set - my_set):
+            continue
+            
         intersection = len(my_set & their_set)
         union = len(my_set | their_set)
         jaccard = intersection / union if union > 0 else 0
@@ -129,16 +101,16 @@ def recommend_user_based(movies, user_item_matrix: csr_matrix, movie_ids: np.nda
 
     # We also get the standard item-based recommendations to pad the list
     # so the user always sees 10 movies, making the UI look consistent.
-    liked_rows = [movie_id_to_row[mid] for mid in my_likes if mid in movie_id_to_row]
-    cf_scores = np.zeros(len(movie_ids))
+    liked_rows = [_movie_id_to_row[mid] for mid in my_likes if mid in _movie_id_to_row]
+    cf_scores = np.zeros(len(_movie_ids))
     if liked_rows:
-        liked_vectors = user_item_matrix[liked_rows]
-        cf_scores = cosine_similarity(liked_vectors, user_item_matrix).mean(axis=0)
+        liked_vectors = _user_item_matrix[liked_rows]
+        cf_scores = cosine_similarity(liked_vectors, _user_item_matrix).mean(axis=0)
         
     order = np.argsort(-cf_scores)
     item_based_recs = []
     for idx in order:
-        mid = movie_ids[idx]
+        mid = _movie_ids[idx]
         if mid not in my_set and mid not in user_based_recs and cf_scores[idx] > 0:
             item_based_recs.append(mid)
             if len(item_based_recs) >= top_n:
@@ -151,14 +123,14 @@ def recommend_user_based(movies, user_item_matrix: csr_matrix, movie_ids: np.nda
         return None, f"Your taste perfectly matches **{best_match_user}**! But they haven't liked anything you haven't already seen."
 
     # Build the dataframe for recommendations
-    out = movies[movies["movieId"].isin(final_recs)][["movieId", "title", "genres"]].copy()
+    out = _movies[_movies["movieId"].isin(final_recs)][["movieId", "title", "genres"]].copy()
     
     # Map scores: give a high dummy score (e.g. 1.0) to the user-based ones to keep them at the top,
     # and the actual cf_scores to the rest
     def get_score(mid):
         if mid in user_based_recs:
             return 1.0 + best_match_score  # Ensure they stay at the very top
-        return cf_scores[movie_id_to_row[mid]]
+        return cf_scores[_movie_id_to_row[mid]]
         
     out["score"] = out["movieId"].map(get_score)
     out = out.sort_values("score", ascending=False).head(top_n).reset_index(drop=True)

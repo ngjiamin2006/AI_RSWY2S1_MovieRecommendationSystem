@@ -38,6 +38,9 @@ source venv/bin/activate     # macOS/Linux
 pip install -r requirements.txt
 
 # launch the app
+cd movie-recommender
+python -m venv venv
+venv\Scripts\activate
 streamlit run app.py
 ```
 

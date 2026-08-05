@@ -14,6 +14,125 @@ import evaluation
 
 st.set_page_config(page_title="Movie Recommender", layout="wide")
 
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap');
+
+/* Apply Inter font globally */
+html, body, [class*="css"]  {   
+    font-family: 'Inter', sans-serif !important;
+}
+
+/* Adjust top padding to prevent content from hiding under the top header */
+.block-container {
+    padding-top: 4rem;
+    padding-bottom: 2rem;
+}
+
+/* Gradient Title */
+h1 {
+    background: -webkit-linear-gradient(45deg, #6366f1, #a855f7);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    font-weight: 800 !important;
+    padding-bottom: 10px;
+}
+
+/* Style the Tabs to look sleek */
+button[data-baseweb="tab"] {
+    background-color: transparent !important;
+    border: none !important;
+    color: #94a3b8 !important;
+    font-size: 1rem !important;
+    font-weight: 600 !important;
+}
+button[data-baseweb="tab"][aria-selected="true"] {
+    color: #E2E8F0 !important;
+    border-bottom: 2px solid #6366f1 !important;
+}
+
+/* Make Tabs sticky (Always on top) */
+div[data-testid="stTabs"] > div:first-of-type,
+div[data-baseweb="tab-list"],
+div[role="tablist"] {
+    position: -webkit-sticky !important;
+    position: sticky !important;
+    top: 0px !important; /* Set to 0px to ensure it sticks to the very top */
+    background-color: rgba(11, 15, 25, 0.98) !important; 
+    backdrop-filter: blur(10px) !important;
+    z-index: 999999 !important;
+    padding-top: 15px !important;
+    padding-bottom: 5px !important;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05) !important;
+}
+
+/* Fix Streamlit parent overflow which breaks position: sticky */
+.block-container, [data-testid="stVerticalBlock"], [data-testid="stVerticalBlockBorderWrapper"], [data-testid="stAppViewBlockContainer"] {
+    overflow: visible !important;
+}
+
+/* Input Fields (Search, numbers) */
+input {
+    background-color: #1a202c !important;
+    border: 1px solid #2d3748 !important;
+    color: white !important;
+    border-radius: 8px !important;
+}
+input:focus {
+    border-color: #6366f1 !important;
+    box-shadow: 0 0 0 1px #6366f1 !important;
+}
+
+/* Metric Boxes */
+div[data-testid="metric-container"] {
+    background-color: rgba(21, 26, 38, 0.7);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    padding: 15px;
+    border-radius: 12px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+}
+
+/* Target ONLY the movie columns using the :has selector so checkboxes and metrics aren't distorted */
+div[data-testid="column"]:has(.movie-poster-card) {
+    background-color: rgba(21, 26, 38, 0.7);
+    padding: 15px;
+    border-radius: 16px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    box-shadow: 0 8px 16px rgba(0, 0, 0, 0.4);
+    transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+/* Hover effect ONLY on movie cards */
+div[data-testid="column"]:has(.movie-poster-card):hover {
+    transform: translateY(-5px);
+    box-shadow: 0 12px 24px rgba(99, 102, 241, 0.15);
+    border: 1px solid rgba(99, 102, 241, 0.3);
+}
+
+/* Give posters rounded corners and shadow */
+img {
+    border-radius: 12px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+}
+
+/* Sleek buttons */
+div.stButton > button:first-child {
+    background: rgba(99, 102, 241, 0.1);
+    border: 1px solid rgba(99, 102, 241, 0.4);
+    color: #E2E8F0;
+    border-radius: 8px;
+    font-weight: 600;
+    transition: all 0.2s ease-in-out;
+}
+div.stButton > button:first-child:hover {
+    background: rgba(99, 102, 241, 0.8);
+    border: 1px solid #6366f1;
+    color: white;
+    transform: scale(1.02);
+}
+</style>
+""", unsafe_allow_html=True)
+
 TMDB_ATTRIBUTION = "This product uses the TMDB API but is not endorsed or certified by TMDB."
 DATASET = "ml-25m"
 
@@ -76,7 +195,7 @@ if "local_profiles" not in st.session_state:
         "User 1": [],
         "User 2": [],
         "User 3": [],
-        "User 4 (Target)": []
+        "User 4": []
     }
 if "current_user" not in st.session_state:
     st.session_state.current_user = "User 1"
@@ -86,9 +205,10 @@ year_bounds = (known_years[0], known_years[-1]) if known_years else (1900, 2025)
 
 with st.sidebar:
     st.write("### Filter by year")
-    year_range = st.slider(
-        "Release year range", min_value=year_bounds[0], max_value=year_bounds[1], value=year_bounds
-    )
+    col1, col2 = st.columns(2)
+    min_yr = col1.number_input("From", min_value=year_bounds[0], max_value=year_bounds[1], value=year_bounds[0], step=1)
+    max_yr = col2.number_input("To", min_value=year_bounds[0], max_value=year_bounds[1], value=year_bounds[1], step=1)
+    year_range = (int(min_yr), int(max_yr))
 
 # Only treat this as an active filter once the user narrows it -- at the
 # full default range, filtering by year_lookup would also silently exclude
@@ -107,8 +227,14 @@ if "liked_movie_ids" not in st.session_state:
 if "selected_genres" not in st.session_state:
     st.session_state.selected_genres = []
 
-st.title(":clapper: Movie Recommender")
+st.title("Movie Recommender")
 
+
+def add_like(movie_id):
+    if movie_id not in st.session_state.liked_movie_ids:
+        st.session_state.liked_movie_ids.append(movie_id)
+        st.toast("Movie liked! Updating algorithms in the background...", icon="🔄")
+        st.session_state.just_liked = True
 
 def render_recommendations(df, key_prefix, show_score=True, score_label="score"):
     if df is None or df.empty:
@@ -119,26 +245,89 @@ def render_recommendations(df, key_prefix, show_score=True, score_label="score")
             )
         else:
             st.info("Not enough signal yet for this algorithm -- showing popular movies instead.")
-        df = get_popular_movies(movies, ratings, top_n=10, allowed_ids=allowed_ids)
+        df = get_popular_movies(movies, ratings, top_n=30, allowed_ids=allowed_ids)
         if df.empty:
             st.warning("No movies at all in this year range -- widen it in the sidebar.")
             return
-    for _, row in df.iterrows():
-        cols = st.columns([1, 5, 2, 1])
-        poster = poster_lookup.get(row["movieId"])
-        if isinstance(poster, str):
-            cols[0].image(poster, width=70)
-        else:
-            cols[0].write(":clapper:")
-        cols[1].write(f"**{row['title']}**  \n{row['genres']}")
-        if show_score and "score" in row:
-            cols[2].write(f"{score_label}: {row['score']:.3f}")
-        elif "release_date" in row:
-            cols[2].write(str(row["release_date"]))
-        if cols[3].button(":+1: Like", key=f"{key_prefix}_{row['movieId']}"):
-            if row["movieId"] not in st.session_state.liked_movie_ids:
-                st.session_state.liked_movie_ids.append(row["movieId"])
-            st.rerun()
+            
+    cols_per_row = 5
+    
+    for i in range(0, len(df), cols_per_row):
+        cols = st.columns(cols_per_row)
+        chunk = df.iloc[i:i+cols_per_row]
+        
+        for col, (_, row) in zip(cols, chunk.iterrows()):
+            with col:
+                poster = poster_lookup.get(row["movieId"])
+                title = row['title'] # we need title early for the fallback poster
+                
+                if isinstance(poster, str) and poster.strip() != "":
+                    st.markdown(
+                        f'<div class="movie-poster-card" style="height:350px; margin-bottom:12px;">'
+                        f'<img src="{poster}" style="width:100%; height:100%; object-fit:cover; border-radius:12px; box-shadow:0 4px 12px rgba(0,0,0,0.5);">'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
+                else:
+                    # Dynamic text-based fallback poster using a nice gradient and the movie title
+                    st.markdown(
+                        f'<div class="movie-poster-card" style="height:350px; display:flex; align-items:center; justify-content:center; '
+                        f'background: linear-gradient(135deg, #1A202C, #0f131c); border-radius:12px; '
+                        f'margin-bottom:12px; box-shadow:0 4px 12px rgba(0,0,0,0.5); padding: 15px; text-align: center; border: 1px solid rgba(255,255,255,0.02);">'
+                        f'<span style="color: #94a3b8; font-size: 1.2rem; font-weight: 600; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;">'
+                        f'{title}</span></div>', 
+                        unsafe_allow_html=True
+                    )
+                
+                score_str = ""
+                if show_score and "score" in row:
+                    # Using title() in case score_label is lowercase
+                    label = score_label.title()
+                    # If it's a count (like number of ratings), format as integer, else as a 2-decimal float
+                    if label.lower() == "ratings" or "count" in label.lower():
+                        score_str = f"Total Reviews: {int(row['score']):,}"
+                    else:
+                        score_str = f"{label}: {row['score']:.2f}/5.0"
+                elif "release_date" in row:
+                    score_str = f"Released: {row['release_date']}"
+                
+                genres = str(row['genres']).split('|')
+                genre_str = ""
+                if genres and genres[0] != 'nan':
+                    genre_str = f"{', '.join(genres[:2])}"
+                
+                # Use a fixed-height container to ensure all cards are identical in height
+                # margin-top: auto pushes the info block to the bottom, aligning it with the button
+                st.markdown(
+                    f'<div style="height: 100px; display: flex; flex-direction: column; margin-bottom: 10px;">'
+                    f'<strong style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-overflow: ellipsis; font-size: 1rem; line-height: 1.2;">'
+                    f'{title}</strong>'
+                    f'<div style="margin-top: auto;">'
+                    f'<div style="color: #a0a0a0; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">'
+                    f'{score_str}</div>'
+                    f'<div style="color: #a0a0a0; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">'
+                    f'{genre_str}</div>'
+                    f'</div>'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
+                
+                is_liked = row["movieId"] in st.session_state.liked_movie_ids
+                if is_liked:
+                    st.button(
+                        "Liked",
+                        key=f"{key_prefix}_{row['movieId']}",
+                        use_container_width=True,
+                        disabled=True
+                    )
+                else:
+                    st.button(
+                        "Like",
+                        key=f"{key_prefix}_{row['movieId']}",
+                        use_container_width=True,
+                        on_click=add_like,
+                        args=(row["movieId"],)
+                    )
 
 
 def refresh_controls(key_prefix):
@@ -151,7 +340,7 @@ def refresh_controls(key_prefix):
     """
     state_key = f"{key_prefix}_refresh_count"
     st.session_state.setdefault(state_key, 0)
-    if st.button(":arrows_counterclockwise: Refresh", key=f"{key_prefix}_refresh_btn"):
+    if st.button("Refresh", key=f"{key_prefix}_refresh_btn"):
         st.session_state[state_key] += 1
         st.rerun()
     count = st.session_state[state_key]
@@ -159,7 +348,7 @@ def refresh_controls(key_prefix):
 
 
 with st.sidebar:
-    st.write("### 👤 Select Local User")
+    st.write("### Select Local User")
     st.caption("Switch users to simulate a collaborative environment.")
     
     selected_user = st.selectbox(
@@ -172,20 +361,19 @@ with st.sidebar:
         st.session_state.current_user = selected_user
         # Point the shared liked_movie_ids to the newly selected user's list
         st.session_state.liked_movie_ids = st.session_state.local_profiles[selected_user]
+        
+        # Clear search and genre selections
+        st.session_state.search_input = ""
+        st.session_state.selected_genres = []
+        for g in genre_names:
+            if f"genre_chk_{g}" in st.session_state:
+                st.session_state[f"genre_chk_{g}"] = False
+                
         st.rerun()
 
-    st.divider()
 
-    st.write("### Your liked movies")
-    if st.session_state.liked_movie_ids:
-        liked_titles = movies[movies["movieId"].isin(st.session_state.liked_movie_ids)]["title"]
-        for t in liked_titles:
-            st.write(f"- {t}")
-    else:
-        st.write("_None yet -- click Like on a recommendation._")
-    if st.button("Reset all users"):
-        st.session_state.clear()
-        st.rerun()
+
+
 
 (tab_home, tab_popular, tab_top_rated, tab_new, tab_cb, tab_cf, tab_hy, tab_eval) = st.tabs(
     ["Home", "Popular", "Top Rated", "New Releases", "Content-Based",
@@ -200,12 +388,34 @@ with tab_home:
     c3.metric("Users", f"{ratings['userId'].nunique():,}")
     
     st.divider()
+    
+    st.write("### Search Movies")
+    search_query = st.text_input("Enter movie title...", placeholder="e.g. Inception or Toy Story", key="search_input")
+    if search_query:
+        search_results = movies[movies['title'].str.contains(search_query, case=False, na=False)].head(20)
+        if search_results.empty:
+            st.warning(f"No movies found matching '{search_query}'.")
+        else:
+            st.success(f"Found {len(search_results)} movies. Click 'Like' to add them to your profile.")
+            render_recommendations(search_results, "search", show_score=False)
+    else:
+        st.info("Type a movie name above to search for specific movies to like.")
+    
+    st.divider()
     st.write("### What do you like to watch?")
-    st.session_state.selected_genres = st.multiselect(
-        "Pick a few genres you enjoy (Cold Start Preferences)", 
-        options=genre_names, 
-        default=st.session_state.selected_genres
-    )
+    st.caption("Pick a few genres you enjoy (Cold Start Preferences).")
+    
+    # Genre Checkbox Grid
+    genre_cols = st.columns(4)
+    new_selected_genres = []
+    
+    for i, g in enumerate(genre_names):
+        with genre_cols[i % 4]:
+            is_checked = st.checkbox(g, value=(g in st.session_state.selected_genres), key=f"genre_chk_{g}")
+            if is_checked:
+                new_selected_genres.append(g)
+                
+    st.session_state.selected_genres = new_selected_genres
     
     st.caption(
         "Content-Based, Collaborative Filtering, and Hybrid tabs use TMDb-enriched TF-IDF features "
@@ -214,17 +424,17 @@ with tab_home:
 
 with tab_popular:
     st.caption("Most-watched movies (highest number of ratings), regardless of average score.")
-    recs = get_most_rated_movies(movies, ratings, top_n=10, allowed_ids=allowed_ids)
+    recs = get_most_rated_movies(movies, ratings, top_n=30, allowed_ids=allowed_ids)
     render_recommendations(recs, "pop", score_label="ratings")
 
 with tab_top_rated:
     st.caption("Highest average rating among movies with enough votes to be reliable.")
-    render_recommendations(get_popular_movies(movies, ratings, top_n=10, allowed_ids=allowed_ids), "top", score_label="avg rating")
+    render_recommendations(get_popular_movies(movies, ratings, top_n=30, allowed_ids=allowed_ids), "top", score_label="avg rating")
 
 with tab_new:
     st.caption("Most recently released movies with TMDb metadata (requires the TMDb dataset).")
     if tfidf_matrix is not None:
-        render_recommendations(get_new_releases(enriched, top_n=10, allowed_ids=allowed_ids), "new", show_score=False)
+        render_recommendations(get_new_releases(enriched, top_n=30, allowed_ids=allowed_ids), "new", show_score=False)
     else:
         st.info("New Releases needs the TMDb dataset (for release dates) -- see the sidebar warning above.")
 
@@ -235,14 +445,14 @@ with tab_cb:
         recs = content_based.recommend_tfidf(
             movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer,
             liked_movie_ids=st.session_state.liked_movie_ids,
-            selected_genres=st.session_state.selected_genres, top_n=10,
+            selected_genres=st.session_state.selected_genres, top_n=30,
             allowed_ids=allowed_ids, **pool_kwargs,
         )
     else:
         recs = content_based.recommend(
             movies, genre_matrix, movie_ids, movie_id_to_row, genre_names,
             liked_movie_ids=st.session_state.liked_movie_ids,
-            selected_genres=st.session_state.selected_genres, top_n=10,
+            selected_genres=st.session_state.selected_genres, top_n=30,
             allowed_ids=allowed_ids, **pool_kwargs,
         )
     render_recommendations(recs, "cb")
@@ -259,7 +469,7 @@ with tab_cf:
         recs, explanation = collaborative_filtering.recommend_user_based(
             movies, user_item_matrix, movie_ids, movie_id_to_row,
             current_user=st.session_state.current_user,
-            local_profiles=st.session_state.local_profiles, top_n=10
+            local_profiles=st.session_state.local_profiles, top_n=30
         )
 
         if explanation:
@@ -272,7 +482,7 @@ with tab_cf:
             st.warning("Falling back to standard Item-Based CF from the full dataset (no local users matched).")
             recs_item_based = collaborative_filtering.recommend(
                 movies, user_item_matrix, movie_ids, movie_id_to_row,
-                liked_movie_ids=st.session_state.liked_movie_ids, top_n=10,
+                liked_movie_ids=st.session_state.liked_movie_ids, top_n=30,
                 allowed_ids=allowed_ids, **pool_kwargs,
             )
             render_recommendations(recs_item_based, "cf")
@@ -285,14 +495,14 @@ with tab_hy:
         recs = hybrid.recommend_tfidf(
             movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer, user_item_matrix,
             liked_movie_ids=st.session_state.liked_movie_ids,
-            selected_genres=st.session_state.selected_genres, top_n=10, alpha=alpha,
+            selected_genres=st.session_state.selected_genres, top_n=30, alpha=alpha,
             allowed_ids=allowed_ids, **pool_kwargs,
         )
     else:
         recs = hybrid.recommend(
             movies, genre_matrix, movie_ids, movie_id_to_row, genre_names, user_item_matrix,
             liked_movie_ids=st.session_state.liked_movie_ids,
-            selected_genres=st.session_state.selected_genres, top_n=10, alpha=alpha,
+            selected_genres=st.session_state.selected_genres, top_n=30, alpha=alpha,
             allowed_ids=allowed_ids, **pool_kwargs,
         )
     render_recommendations(recs, "hy")
@@ -312,3 +522,53 @@ with tab_eval:
         st.bar_chart(results[["coverage", "diversity"]])
 
 st.caption(TMDB_ATTRIBUTION)
+
+with st.sidebar:
+    with st.expander("👥 View All Users' Profiles", expanded=False):
+        html_content = "<div style='max-height: 300px; overflow-y: auto; padding-right: 10px;'>"
+        for p_user, p_likes in st.session_state.local_profiles.items():
+            html_content += f"<strong style='color: white;'>{p_user}</strong><br>"
+            if p_likes:
+                liked_movies = movies[movies["movieId"].isin(p_likes)][["title", "genres"]]
+                html_content += "<ul style='margin-top: 5px; padding-left: 20px; font-size: 0.85em;'>"
+                for _, row in liked_movies.iterrows():
+                    title = row['title']
+                    genres = str(row['genres']).replace('|', ', ') if 'genres' in row and str(row['genres']) != 'nan' else ''
+                    if genres:
+                        html_content += f"<li style='margin-bottom: 5px;'><span style='color: #E2E8F0;'>{title}</span><br><span style='color: #94a3b8; font-size: 0.9em;'>{genres}</span></li>"
+                    else:
+                        html_content += f"<li style='margin-bottom: 5px;'><span style='color: #E2E8F0;'>{title}</span></li>"
+                html_content += "</ul>"
+            else:
+                html_content += "<p style='color: #a0a0a0; font-size: 0.85em; margin-bottom: 15px;'>No movies liked yet.</p>"
+        html_content += "</div>"
+        
+        st.markdown(html_content, unsafe_allow_html=True)
+
+    st.divider()
+    st.write("### Your liked movies")
+    if st.session_state.liked_movie_ids:
+        liked_data = movies[movies["movieId"].isin(st.session_state.liked_movie_ids)]
+        for _, row in liked_data.iterrows():
+            c1, c2 = st.columns([5, 1])
+            title = row["title"]
+            genres = str(row["genres"]).replace("|", ", ") if "genres" in row and str(row["genres"]) != "nan" else ""
+            
+            with c1:
+                if genres:
+                    st.markdown(f"**{title}**<br><span style='color: #a0a0a0; font-size: 0.85em;'>{genres}</span>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"**{title}**", unsafe_allow_html=True)
+            with c2:
+                if st.button("❌", key=f"remove_{row['movieId']}", help="Remove movie"):
+                    st.session_state.liked_movie_ids.remove(row["movieId"])
+                    st.rerun()
+    else:
+        st.write("_None yet -- click Like on a recommendation._")
+    if st.button("Reset all users"):
+        st.session_state.clear()
+        st.rerun()
+
+if st.session_state.get("just_liked", False):
+    st.toast("Update complete! Your recommendations are ready.", icon="✅")
+    st.session_state.just_liked = False
