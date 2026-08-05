@@ -239,7 +239,7 @@ def render_recommendations(df, key_prefix, show_score=True, score_label="score")
             )
         else:
             st.info("Not enough signal yet for this algorithm -- showing popular movies instead.")
-        df = get_popular_movies(movies, ratings, top_n=10, allowed_ids=allowed_ids)
+        df = get_popular_movies(movies, ratings, top_n=30, allowed_ids=allowed_ids)
         if df.empty:
             st.warning("No movies at all in this year range -- widen it in the sidebar.")
             return
@@ -309,7 +309,6 @@ def render_recommendations(df, key_prefix, show_score=True, score_label="score")
                 if st.button("Like", key=f"{key_prefix}_{row['movieId']}", use_container_width=True):
                     if row["movieId"] not in st.session_state.liked_movie_ids:
                         st.session_state.liked_movie_ids.append(row["movieId"])
-                    st.rerun()
 
 
 def refresh_controls(key_prefix):
@@ -343,32 +342,19 @@ with st.sidebar:
         st.session_state.current_user = selected_user
         # Point the shared liked_movie_ids to the newly selected user's list
         st.session_state.liked_movie_ids = st.session_state.local_profiles[selected_user]
+        
+        # Clear search and genre selections
+        st.session_state.search_input = ""
+        st.session_state.selected_genres = []
+        for g in genre_names:
+            if f"genre_chk_{g}" in st.session_state:
+                st.session_state[f"genre_chk_{g}"] = False
+                
         st.rerun()
 
-    st.divider()
 
-    st.write("### Your liked movies")
-    if st.session_state.liked_movie_ids:
-        liked_data = movies[movies["movieId"].isin(st.session_state.liked_movie_ids)]
-        for _, row in liked_data.iterrows():
-            c1, c2 = st.columns([5, 1])
-            title = row["title"]
-            genres = str(row["genres"]).replace("|", ", ") if "genres" in row and str(row["genres"]) != "nan" else ""
-            
-            with c1:
-                if genres:
-                    st.markdown(f"**{title}**<br><span style='color: #a0a0a0; font-size: 0.85em;'>{genres}</span>", unsafe_allow_html=True)
-                else:
-                    st.markdown(f"**{title}**", unsafe_allow_html=True)
-            with c2:
-                if st.button("❌", key=f"remove_{row['movieId']}", help="Remove movie"):
-                    st.session_state.liked_movie_ids.remove(row["movieId"])
-                    st.rerun()
-    else:
-        st.write("_None yet -- click Like on a recommendation._")
-    if st.button("Reset all users"):
-        st.session_state.clear()
-        st.rerun()
+
+
 
 (tab_home, tab_popular, tab_top_rated, tab_new, tab_cb, tab_cf, tab_hy, tab_eval) = st.tabs(
     ["Home", "Popular", "Top Rated", "New Releases", "Content-Based",
@@ -385,7 +371,7 @@ with tab_home:
     st.divider()
     
     st.write("### Search Movies")
-    search_query = st.text_input("Enter movie title...", placeholder="e.g. Inception or Toy Story")
+    search_query = st.text_input("Enter movie title...", placeholder="e.g. Inception or Toy Story", key="search_input")
     if search_query:
         search_results = movies[movies['title'].str.contains(search_query, case=False, na=False)].head(20)
         if search_results.empty:
@@ -406,7 +392,7 @@ with tab_home:
     
     for i, g in enumerate(genre_names):
         with genre_cols[i % 4]:
-            is_checked = st.checkbox(g, value=(g in st.session_state.selected_genres))
+            is_checked = st.checkbox(g, value=(g in st.session_state.selected_genres), key=f"genre_chk_{g}")
             if is_checked:
                 new_selected_genres.append(g)
                 
@@ -419,17 +405,17 @@ with tab_home:
 
 with tab_popular:
     st.caption("Most-watched movies (highest number of ratings), regardless of average score.")
-    recs = get_most_rated_movies(movies, ratings, top_n=10, allowed_ids=allowed_ids)
+    recs = get_most_rated_movies(movies, ratings, top_n=30, allowed_ids=allowed_ids)
     render_recommendations(recs, "pop", score_label="ratings")
 
 with tab_top_rated:
     st.caption("Highest average rating among movies with enough votes to be reliable.")
-    render_recommendations(get_popular_movies(movies, ratings, top_n=10, allowed_ids=allowed_ids), "top", score_label="avg rating")
+    render_recommendations(get_popular_movies(movies, ratings, top_n=30, allowed_ids=allowed_ids), "top", score_label="avg rating")
 
 with tab_new:
     st.caption("Most recently released movies with TMDb metadata (requires the TMDb dataset).")
     if tfidf_matrix is not None:
-        render_recommendations(get_new_releases(enriched, top_n=10, allowed_ids=allowed_ids), "new", show_score=False)
+        render_recommendations(get_new_releases(enriched, top_n=30, allowed_ids=allowed_ids), "new", show_score=False)
     else:
         st.info("New Releases needs the TMDb dataset (for release dates) -- see the sidebar warning above.")
 
@@ -440,14 +426,14 @@ with tab_cb:
         recs = content_based.recommend_tfidf(
             movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer,
             liked_movie_ids=st.session_state.liked_movie_ids,
-            selected_genres=st.session_state.selected_genres, top_n=10,
+            selected_genres=st.session_state.selected_genres, top_n=30,
             allowed_ids=allowed_ids, **pool_kwargs,
         )
     else:
         recs = content_based.recommend(
             movies, genre_matrix, movie_ids, movie_id_to_row, genre_names,
             liked_movie_ids=st.session_state.liked_movie_ids,
-            selected_genres=st.session_state.selected_genres, top_n=10,
+            selected_genres=st.session_state.selected_genres, top_n=30,
             allowed_ids=allowed_ids, **pool_kwargs,
         )
     render_recommendations(recs, "cb")
@@ -464,7 +450,7 @@ with tab_cf:
         recs, explanation = collaborative_filtering.recommend_user_based(
             movies, user_item_matrix, movie_ids, movie_id_to_row,
             current_user=st.session_state.current_user,
-            local_profiles=st.session_state.local_profiles, top_n=10
+            local_profiles=st.session_state.local_profiles, top_n=30
         )
 
         if explanation:
@@ -477,7 +463,7 @@ with tab_cf:
             st.warning("Falling back to standard Item-Based CF from the full dataset (no local users matched).")
             recs_item_based = collaborative_filtering.recommend(
                 movies, user_item_matrix, movie_ids, movie_id_to_row,
-                liked_movie_ids=st.session_state.liked_movie_ids, top_n=10,
+                liked_movie_ids=st.session_state.liked_movie_ids, top_n=30,
                 allowed_ids=allowed_ids, **pool_kwargs,
             )
             render_recommendations(recs_item_based, "cf")
@@ -490,14 +476,14 @@ with tab_hy:
         recs = hybrid.recommend_tfidf(
             movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer, user_item_matrix,
             liked_movie_ids=st.session_state.liked_movie_ids,
-            selected_genres=st.session_state.selected_genres, top_n=10, alpha=alpha,
+            selected_genres=st.session_state.selected_genres, top_n=30, alpha=alpha,
             allowed_ids=allowed_ids, **pool_kwargs,
         )
     else:
         recs = hybrid.recommend(
             movies, genre_matrix, movie_ids, movie_id_to_row, genre_names, user_item_matrix,
             liked_movie_ids=st.session_state.liked_movie_ids,
-            selected_genres=st.session_state.selected_genres, top_n=10, alpha=alpha,
+            selected_genres=st.session_state.selected_genres, top_n=30, alpha=alpha,
             allowed_ids=allowed_ids, **pool_kwargs,
         )
     render_recommendations(recs, "hy")
@@ -517,3 +503,47 @@ with tab_eval:
         st.bar_chart(results[["coverage", "diversity"]])
 
 st.caption(TMDB_ATTRIBUTION)
+
+with st.sidebar:
+    with st.expander("👥 View All Users' Profiles", expanded=False):
+        html_content = "<div style='max-height: 300px; overflow-y: auto; padding-right: 10px;'>"
+        for p_user, p_likes in st.session_state.local_profiles.items():
+            html_content += f"<strong style='color: white;'>{p_user}</strong><br>"
+            if p_likes:
+                liked_movies = movies[movies["movieId"].isin(p_likes)][["title", "genres"]]
+                html_content += "<ul style='margin-top: 5px; padding-left: 20px; font-size: 0.85em;'>"
+                for _, row in liked_movies.iterrows():
+                    title = row['title']
+                    genres = str(row['genres']).replace('|', ', ') if 'genres' in row and str(row['genres']) != 'nan' else ''
+                    if genres:
+                        html_content += f"<li style='margin-bottom: 5px;'><span style='color: #E2E8F0;'>{title}</span><br><span style='color: #94a3b8; font-size: 0.9em;'>{genres}</span></li>"
+                    else:
+                        html_content += f"<li style='margin-bottom: 5px;'><span style='color: #E2E8F0;'>{title}</span></li>"
+                html_content += "</ul>"
+            else:
+                html_content += "<p style='color: #a0a0a0; font-size: 0.85em; margin-bottom: 15px;'>No movies liked yet.</p>"
+        html_content += "</div>"
+        
+        st.markdown(html_content, unsafe_allow_html=True)
+
+    st.divider()
+    st.write("### Your liked movies")
+    if st.session_state.liked_movie_ids:
+        liked_data = movies[movies["movieId"].isin(st.session_state.liked_movie_ids)]
+        for _, row in liked_data.iterrows():
+            c1, c2 = st.columns([5, 1])
+            title = row["title"]
+            genres = str(row["genres"]).replace("|", ", ") if "genres" in row and str(row["genres"]) != "nan" else ""
+            
+            with c1:
+                if genres:
+                    st.markdown(f"**{title}**<br><span style='color: #a0a0a0; font-size: 0.85em;'>{genres}</span>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"**{title}**", unsafe_allow_html=True)
+            with c2:
+                if st.button("❌", key=f"remove_{row['movieId']}", help="Remove movie"):
+                    st.session_state.liked_movie_ids.remove(row["movieId"])
+    else:
+        st.write("_None yet -- click Like on a recommendation._")
+    if st.button("Reset all users"):
+        st.session_state.clear()
