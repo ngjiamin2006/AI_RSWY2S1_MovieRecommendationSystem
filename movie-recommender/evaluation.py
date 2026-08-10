@@ -257,7 +257,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Run offline evaluation for the movie recommender.")
     parser.add_argument("--dataset", choices=["ml-latest-small", "ml-25m"], default="ml-25m")
-    parser.add_argument("--max-users", type=int, default=30)
+    parser.add_argument("--max-users", type=int, default=10)
     parser.add_argument("--k", type=int, default=10)
     args = parser.parse_args()
 

@@ -229,7 +229,20 @@ if "liked_movie_ids" not in st.session_state:
 if "selected_genres" not in st.session_state:
     st.session_state.selected_genres = []
 
-st.title("Movie Recommender")
+title_col, stats_col = st.columns([5, 4])
+with title_col:
+    st.title("Movie Recommender")
+with stats_col:
+    st.markdown(
+        f"""
+        <div style='display: flex; justify-content: flex-end; gap: 30px; padding-top: 25px;'>
+            <div style='text-align: center;'><span style='color: #94a3b8; font-size: 0.85rem;'>Movies</span><br><span style='font-size: 1.2rem; font-weight: 600;'>{len(movies):,}</span></div>
+            <div style='text-align: center;'><span style='color: #94a3b8; font-size: 0.85rem;'>Ratings</span><br><span style='font-size: 1.2rem; font-weight: 600;'>{len(ratings):,}</span></div>
+            <div style='text-align: center;'><span style='color: #94a3b8; font-size: 0.85rem;'>Users</span><br><span style='font-size: 1.2rem; font-weight: 600;'>{ratings['userId'].nunique():,}</span></div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 
 def add_like(movie_id):
@@ -373,17 +386,48 @@ with st.sidebar:
                 
         st.rerun()
 
+def _best_match_recs(algorithm_name, pool_kwargs):
+    """Run whichever algorithm the Evaluation tab measured as having the highest F1@K."""
+    common = dict(
+        liked_movie_ids=st.session_state.liked_movie_ids,
+        top_n=30,
+        allowed_ids=allowed_ids,
+        **pool_kwargs,
+    )
+    if algorithm_name == "content_based":
+        return content_based.recommend(
+            movies, genre_matrix, movie_ids, movie_id_to_row, genre_names,
+            selected_genres=st.session_state.selected_genres, **common,
+        )
+    if algorithm_name == "content_based_tfidf" and tfidf_matrix is not None:
+        return content_based.recommend_tfidf(
+            movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer,
+            selected_genres=st.session_state.selected_genres, **common,
+        )
+    if algorithm_name == "collaborative":
+        return collaborative_filtering.recommend(
+            movies, user_item_matrix, movie_ids, movie_id_to_row, **common,
+        )
+    if algorithm_name == "hybrid_tfidf" and tfidf_matrix is not None:
+        return hybrid.recommend_tfidf(
+            movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer, user_item_matrix,
+            selected_genres=st.session_state.selected_genres, alpha=0.5, **common,
+        )
+    # "hybrid", or a fallback if the winning name needs TF-IDF data that isn't loaded
+    return hybrid.recommend(
+        movies, genre_matrix, movie_ids, movie_id_to_row, genre_names, user_item_matrix,
+        selected_genres=st.session_state.selected_genres, alpha=0.5, **common,
+    )
 
 
 
 
-(tab_home, tab_popular, tab_top_rated, tab_new, tab_cb, tab_cf, tab_hy, tab_best, tab_eval, tab_survey) = st.tabs(
-    ["Home", "Popular", "Top Rated", "New Releases", "Content-Based",
-     "Collaborative Filtering", "Hybrid", "Best Match", "Evaluation", "Feedback"]
+(tab_home, tab_ml, tab_eval, tab_survey) = st.tabs(
+    ["Home", "Recommendations", "Evaluation", "Feedback"]
 )
 
 with tab_home:
-    st.subheader("Welcome back!")
+    st.subheader("Welcome to the Movie Recommendation System!")
     c1, c2, c3 = st.columns(3)
     c1.metric("Movies", f"{len(movies):,}")
     c2.metric("Ratings", f"{len(ratings):,}")
@@ -424,90 +468,122 @@ with tab_home:
         "(overview/keywords/cast/director) when available, falling back to genre-only similarity otherwise."
     )
 
-with tab_popular:
-    st.caption("Most-watched movies (highest number of ratings), regardless of average score.")
-    recs = get_most_rated_movies(movies, ratings, top_n=30, allowed_ids=allowed_ids)
-    render_recommendations(recs, "pop", score_label="ratings")
-
-with tab_top_rated:
-    st.caption("Highest average rating among movies with enough votes to be reliable.")
-    render_recommendations(get_popular_movies(movies, ratings, top_n=30, allowed_ids=allowed_ids), "top", score_label="avg rating")
-
-with tab_new:
-    st.caption("Most recently released movies with TMDb metadata (requires the TMDb dataset).")
-    if tfidf_matrix is not None:
-        render_recommendations(get_new_releases(enriched, top_n=30, allowed_ids=allowed_ids), "new", show_score=False)
-    else:
-        st.info("New Releases needs the TMDb dataset (for release dates) -- see the sidebar warning above.")
-
-with tab_cb:
-    st.caption("Recommends movies with similar content to what you've liked (or picked at onboarding).")
-    pool_kwargs = refresh_controls("cb")
-    if tfidf_matrix is not None:
-        recs = content_based.recommend_tfidf(
-            movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer,
-            liked_movie_ids=st.session_state.liked_movie_ids,
-            selected_genres=st.session_state.selected_genres, top_n=30,
-            allowed_ids=allowed_ids, **pool_kwargs,
-        )
-    else:
-        recs = content_based.recommend(
-            movies, genre_matrix, movie_ids, movie_id_to_row, genre_names,
-            liked_movie_ids=st.session_state.liked_movie_ids,
-            selected_genres=st.session_state.selected_genres, top_n=30,
-            allowed_ids=allowed_ids, **pool_kwargs,
-        )
-    render_recommendations(recs, "cb")
-
-with tab_cf:
-    st.caption("Interactive Demo: Recommends movies liked by other Local Users with similar taste to you.")
-    pool_kwargs = refresh_controls("cf")
-
-    if not st.session_state.liked_movie_ids:
-        # If the user hasn't liked anything, we don't need to try and fail multiple times.
-        # Just pass None to trigger the standard popular movies fallback.
-        render_recommendations(None, "cf")
-    else:
-        recs, explanation = collaborative_filtering.recommend_user_based(
-            movies, user_item_matrix, movie_ids, movie_id_to_row,
-            current_user=st.session_state.current_user,
-            local_profiles=st.session_state.local_profiles, top_n=30
-        )
-
-        if explanation:
-            st.info(explanation)
-
-        if recs is not None and not recs.empty:
-            render_recommendations(recs, "cf")
+    st.divider()
+    st.write("### Discover Movies")
+    discover_option = st.radio("Explore curated lists", ["Popular", "Top Rated", "New Releases"], horizontal=True, label_visibility="collapsed")
+    
+    if discover_option == "Popular":
+        st.caption("Most-watched movies (highest number of ratings), regardless of average score.")
+        recs = get_most_rated_movies(movies, ratings, top_n=30, allowed_ids=allowed_ids)
+        render_recommendations(recs, "pop", score_label="ratings")
+    elif discover_option == "Top Rated":
+        st.caption("Highest average rating among movies with enough votes to be reliable.")
+        render_recommendations(get_popular_movies(movies, ratings, top_n=30, allowed_ids=allowed_ids), "top", score_label="avg rating")
+    elif discover_option == "New Releases":
+        st.caption("Most recently released movies with TMDb metadata (requires the TMDb dataset).")
+        if tfidf_matrix is not None:
+            render_recommendations(get_new_releases(enriched, top_n=30, allowed_ids=allowed_ids), "new", show_score=False)
         else:
-            # Fall back to item-based if no user matches, or if we got None
-            st.warning("Falling back to standard Item-Based CF from the full dataset (no local users matched).")
-            recs_item_based = collaborative_filtering.recommend(
-                movies, user_item_matrix, movie_ids, movie_id_to_row,
-                liked_movie_ids=st.session_state.liked_movie_ids, top_n=30,
+            st.info("New Releases needs the TMDb dataset (for release dates) -- see the sidebar warning above.")
+
+with tab_ml:
+    st.write("### 🤖 AI Recommendation Models")
+    model_option = st.radio(
+        "Select an algorithm", 
+        ["🏆 Best Match (Auto-selected)", "Content-Based", "Collaborative Filtering", "Hybrid"],
+        horizontal=True,
+        label_visibility="collapsed"
+    )
+    
+    if model_option == "🏆 Best Match (Auto-selected)":
+        eval_results = st.session_state.get("eval_results")
+        eval_k = st.session_state.get("eval_k")
+
+        if eval_results is None:
+            best_name = "hybrid_tfidf" if tfidf_matrix is not None else "hybrid"
+            st.warning(
+                "No evaluation has been run yet, so this defaults to Hybrid. "
+                "Run the **Evaluation** tab first so this picks whichever algorithm actually scores best."
+            )
+        else:
+            f1_col = f"f1@{eval_k}"
+            best_name = eval_results[f1_col].idxmax()
+            best_score = eval_results.loc[best_name, f1_col]
+            st.success(
+                f"Selected **{best_name}** -- highest F1@{eval_k} ({best_score:.3f}) "
+                f"among {len(eval_results)} algorithms tested in the Evaluation tab."
+            )
+        st.caption("Here are your top recommendations generated by the best-performing model.")
+
+        pool_kwargs = refresh_controls("best")
+        recs_best = _best_match_recs(best_name, pool_kwargs)
+        render_recommendations(recs_best, "best")
+        
+    elif model_option == "Content-Based":
+        st.caption("Recommends movies with similar content to what you've liked (or picked at onboarding).")
+        pool_kwargs = refresh_controls("cb")
+        if tfidf_matrix is not None:
+            recs = content_based.recommend_tfidf(
+                movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer,
+                liked_movie_ids=st.session_state.liked_movie_ids,
+                selected_genres=st.session_state.selected_genres, top_n=30,
                 allowed_ids=allowed_ids, **pool_kwargs,
             )
-            render_recommendations(recs_item_based, "cf")
+        else:
+            recs = content_based.recommend(
+                movies, genre_matrix, movie_ids, movie_id_to_row, genre_names,
+                liked_movie_ids=st.session_state.liked_movie_ids,
+                selected_genres=st.session_state.selected_genres, top_n=30,
+                allowed_ids=allowed_ids, **pool_kwargs,
+            )
+        render_recommendations(recs, "cb")
 
-with tab_hy:
-    st.caption("Blends the content-based and collaborative filtering scores.")
-    alpha = st.slider("Weight towards content-based (alpha)", 0.0, 1.0, 0.5, 0.1)
-    pool_kwargs = refresh_controls("hy")
-    if tfidf_matrix is not None:
-        recs = hybrid.recommend_tfidf(
-            movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer, user_item_matrix,
-            liked_movie_ids=st.session_state.liked_movie_ids,
-            selected_genres=st.session_state.selected_genres, top_n=30, alpha=alpha,
-            allowed_ids=allowed_ids, **pool_kwargs,
-        )
-    else:
-        recs = hybrid.recommend(
-            movies, genre_matrix, movie_ids, movie_id_to_row, genre_names, user_item_matrix,
-            liked_movie_ids=st.session_state.liked_movie_ids,
-            selected_genres=st.session_state.selected_genres, top_n=30, alpha=alpha,
-            allowed_ids=allowed_ids, **pool_kwargs,
-        )
-    render_recommendations(recs, "hy")
+    elif model_option == "Collaborative Filtering":
+        st.caption("Interactive Demo: Recommends movies liked by other Local Users with similar taste to you.")
+        pool_kwargs = refresh_controls("cf")
+
+        if not st.session_state.liked_movie_ids:
+            render_recommendations(None, "cf")
+        else:
+            recs, explanation = collaborative_filtering.recommend_user_based(
+                movies, user_item_matrix, movie_ids, movie_id_to_row,
+                current_user=st.session_state.current_user,
+                local_profiles=st.session_state.local_profiles, top_n=30
+            )
+
+            if explanation:
+                st.info(explanation)
+
+            if recs is not None and not recs.empty:
+                render_recommendations(recs, "cf")
+            else:
+                st.warning("Falling back to standard Item-Based CF from the full dataset (no local users matched).")
+                recs_item_based = collaborative_filtering.recommend(
+                    movies, user_item_matrix, movie_ids, movie_id_to_row,
+                    liked_movie_ids=st.session_state.liked_movie_ids, top_n=30,
+                    allowed_ids=allowed_ids, **pool_kwargs,
+                )
+                render_recommendations(recs_item_based, "cf")
+
+    elif model_option == "Hybrid":
+        st.caption("Blends the content-based and collaborative filtering scores.")
+        alpha = st.slider("Weight towards content-based (alpha)", 0.0, 1.0, 0.5, 0.1)
+        pool_kwargs = refresh_controls("hy")
+        if tfidf_matrix is not None:
+            recs = hybrid.recommend_tfidf(
+                movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer, user_item_matrix,
+                liked_movie_ids=st.session_state.liked_movie_ids,
+                selected_genres=st.session_state.selected_genres, top_n=30, alpha=alpha,
+                allowed_ids=allowed_ids, **pool_kwargs,
+            )
+        else:
+            recs = hybrid.recommend(
+                movies, genre_matrix, movie_ids, movie_id_to_row, genre_names, user_item_matrix,
+                liked_movie_ids=st.session_state.liked_movie_ids,
+                selected_genres=st.session_state.selected_genres, top_n=30, alpha=alpha,
+                allowed_ids=allowed_ids, **pool_kwargs,
+            )
+        render_recommendations(recs, "hy")
 
 with tab_eval:
     st.caption("📊 **Offline Evaluation**: The system hides 20% of historical user ratings and tests if our algorithms can correctly predict them. This generates the accuracy scores for your report.")
@@ -538,64 +614,8 @@ with tab_eval:
             st.dataframe(metrics_df)
 
 
-def _best_match_recs(algorithm_name, pool_kwargs):
-    """Run whichever algorithm the Evaluation tab measured as having the highest F1@K."""
-    common = dict(
-        liked_movie_ids=st.session_state.liked_movie_ids,
-        top_n=30,
-        allowed_ids=allowed_ids,
-        **pool_kwargs,
-    )
-    if algorithm_name == "content_based":
-        return content_based.recommend(
-            movies, genre_matrix, movie_ids, movie_id_to_row, genre_names,
-            selected_genres=st.session_state.selected_genres, **common,
-        )
-    if algorithm_name == "content_based_tfidf" and tfidf_matrix is not None:
-        return content_based.recommend_tfidf(
-            movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer,
-            selected_genres=st.session_state.selected_genres, **common,
-        )
-    if algorithm_name == "collaborative":
-        return collaborative_filtering.recommend(
-            movies, user_item_matrix, movie_ids, movie_id_to_row, **common,
-        )
-    if algorithm_name == "hybrid_tfidf" and tfidf_matrix is not None:
-        return hybrid.recommend_tfidf(
-            movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer, user_item_matrix,
-            selected_genres=st.session_state.selected_genres, alpha=0.5, **common,
-        )
-    # "hybrid", or a fallback if the winning name needs TF-IDF data that isn't loaded
-    return hybrid.recommend(
-        movies, genre_matrix, movie_ids, movie_id_to_row, genre_names, user_item_matrix,
-        selected_genres=st.session_state.selected_genres, alpha=0.5, **common,
-    )
 
-
-with tab_best:
-    st.subheader("🏆 Our Best Recommendation Model")
-    eval_results = st.session_state.get("eval_results")
-    eval_k = st.session_state.get("eval_k")
-
-    if eval_results is None:
-        best_name = "hybrid_tfidf" if tfidf_matrix is not None else "hybrid"
-        st.warning(
-            "No evaluation has been run yet, so this defaults to Hybrid. "
-            "Run the **Evaluation** tab first so this picks whichever algorithm actually scores best."
-        )
-    else:
-        f1_col = f"f1@{eval_k}"
-        best_name = eval_results[f1_col].idxmax()
-        best_score = eval_results.loc[best_name, f1_col]
-        st.success(
-            f"Selected **{best_name}** -- highest F1@{eval_k} ({best_score:.3f}) "
-            f"among {len(eval_results)} algorithms tested in the Evaluation tab."
-        )
-    st.caption("Here are your top recommendations generated by the best-performing model.")
-
-    pool_kwargs = refresh_controls("best")
-    recs_best = _best_match_recs(best_name, pool_kwargs)
-    render_recommendations(recs_best, "best")
+# tab_best has been moved inside tab_ml
 
 with tab_survey:
     st.subheader("📝 User Feedback Questionnaire")
