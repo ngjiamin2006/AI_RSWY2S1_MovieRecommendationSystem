@@ -542,26 +542,110 @@ with tab_cf:
             )
             render_recommendations(recs_item_based, "cf")
 
+def render_hybrid_cards(display_df, key_prefix="hy"):
+    """Frontend rendering for the search-driven hybrid results.
+
+    Deliberately minimal compared to render_recommendations() -- poster +
+    title only. No score, no genre: those live in meta["analysis"] for the
+    report/backend, not the recommendation cards (per spec).
+    """
+    if display_df is None or display_df.empty:
+        return
+    cols_per_row = 5
+    for i in range(0, len(display_df), cols_per_row):
+        cols = st.columns(cols_per_row)
+        chunk = display_df.iloc[i:i + cols_per_row]
+        for col, (_, row) in zip(cols, chunk.iterrows()):
+            with col:
+                poster = poster_lookup.get(row["movieId"])
+                title = row["title"]
+                if isinstance(poster, str) and poster.strip() != "":
+                    st.markdown(
+                        f'<div class="movie-poster-card" style="height:350px; margin-bottom:12px;">'
+                        f'<img src="{poster}" style="width:100%; height:100%; object-fit:cover; border-radius:12px; box-shadow:0 4px 12px rgba(0,0,0,0.5);">'
+                        f'</div>', unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        f'<div class="movie-poster-card" style="height:350px; display:flex; align-items:center; justify-content:center; '
+                        f'background: linear-gradient(135deg, #1A202C, #0f131c); border-radius:12px; '
+                        f'margin-bottom:12px; box-shadow:0 4px 12px rgba(0,0,0,0.5); padding: 15px; text-align: center; border: 1px solid rgba(255,255,255,0.02);">'
+                        f'<span style="color: #94a3b8; font-size: 1.2rem; font-weight: 600; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;">'
+                        f'{title}</span></div>', unsafe_allow_html=True,
+                    )
+                st.markdown(
+                    f'<div style="height: 40px; display: flex; align-items: flex-start; margin-bottom: 10px;">'
+                    f'<strong style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-overflow: ellipsis; font-size: 1rem; line-height: 1.2;">'
+                    f'{title}</strong></div>', unsafe_allow_html=True,
+                )
+
+
+def render_searched_movie_card(movie_id, title):
+    """Small highlighted card for the movie the user actually searched for --
+    shown once above the recommendation grid so they can see what was
+    matched (in case the search matched a different title than expected,
+    e.g. searching "Toy Story" matches "Toy Story" over "Toy Story 2").
+    Deliberately kept out of `render_hybrid_cards` -- that grid is only for
+    the *recommended* (similar) movies, never the searched one itself.
+    """
+    poster = poster_lookup.get(movie_id)
+    col = st.columns([1, 3, 1])[1]  # center a narrower column
+    with col:
+        if isinstance(poster, str) and poster.strip() != "":
+            st.markdown(
+                f'<div style="display:flex; gap:16px; align-items:center; padding:12px; '
+                f'background: rgba(99, 102, 241, 0.08); border: 1px solid rgba(99, 102, 241, 0.3); '
+                f'border-radius:12px; margin-bottom: 16px;">'
+                f'<img src="{poster}" style="width:70px; height:100px; object-fit:cover; border-radius:8px; flex-shrink:0;">'
+                f'<div><div style="font-size:0.8rem; color:#a0a0a0;">You searched for</div>'
+                f'<strong style="font-size:1.1rem;">{title}</strong></div></div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f'<div style="padding:12px; background: rgba(99, 102, 241, 0.08); '
+                f'border: 1px solid rgba(99, 102, 241, 0.3); border-radius:12px; margin-bottom: 16px;">'
+                f'<div style="font-size:0.8rem; color:#a0a0a0;">You searched for</div>'
+                f'<strong style="font-size:1.1rem;">{title}</strong></div>',
+                unsafe_allow_html=True,
+            )
+
+
 with tab_hy:
-    st.caption("Blends the content-based and collaborative filtering scores.")
-    search_and_like("hy_search_input", "hy_search")
-    alpha = st.slider("Weight towards content-based (alpha)", 0.0, 1.0, 0.5, 0.1)
-    pool_kwargs = refresh_controls("hy")
-    if tfidf_matrix is not None:
-        recs = hybrid.recommend_tfidf(
-            movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer, user_item_matrix,
-            liked_movie_ids=st.session_state.liked_movie_ids,
-            selected_genres=st.session_state.selected_genres, top_n=30, alpha=alpha,
-            allowed_ids=allowed_ids, **pool_kwargs,
+    st.caption(
+        "Search for a movie you like -- the hybrid model blends its own content "
+        "(overview/genre/keywords) with a ratings-based collaborative signal. No liking/rating needed first."
+    )
+    alpha = st.slider("Weight towards content-based (alpha)", 0.0, 1.0, 0.5, 0.1, key="hy_alpha")
+    content_matrix = tfidf_matrix if tfidf_matrix is not None else genre_matrix
+
+    hy_search = st.text_input(
+        "Search a movie title...", placeholder="e.g. Inception or Toy Story", key="hy_search_input"
+    )
+
+    if hy_search:
+        recs, meta = hybrid.recommend_by_search(
+            movies, content_matrix, user_item_matrix, movie_ids, movie_id_to_row,
+            search_title=hy_search, top_n=15, alpha=alpha, allowed_ids=allowed_ids,
         )
+        if meta.get("error"):
+            st.warning(meta["error"])
+        else:
+            render_searched_movie_card(meta["matched_movie_id"], meta["matched_title"])
+            st.write(f"**Movies similar to {meta['matched_title']}:**")
+            render_hybrid_cards(recs, "hy")
+
+            with st.expander("📊 Analysis (score & genre breakdown -- for the report, not end users)"):
+                st.dataframe(meta["analysis"], use_container_width=True)
     else:
-        recs = hybrid.recommend(
-            movies, genre_matrix, movie_ids, movie_id_to_row, genre_names, user_item_matrix,
-            liked_movie_ids=st.session_state.liked_movie_ids,
-            selected_genres=st.session_state.selected_genres, top_n=30, alpha=alpha,
-            allowed_ids=allowed_ids, **pool_kwargs,
-        )
-    render_recommendations(recs, "hy")
+        st.info("Type a movie title above to get hybrid recommendations.")
+
+    st.session_state.setdefault("hy_recent_searches", [])
+    if hy_search and (not st.session_state.hy_recent_searches or st.session_state.hy_recent_searches[-1] != hy_search):
+        st.session_state.hy_recent_searches.append(hy_search)
+    if st.session_state.hy_recent_searches:
+        st.caption("Recorded searches this session (also logged to logs/hybrid_search_log.csv): "
+                   + ", ".join(st.session_state.hy_recent_searches[-5:]))
 
 with tab_eval:
     st.caption("Offline evaluation on a held-out test split of real ratings -- this is what goes in your report.")
