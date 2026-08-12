@@ -525,15 +525,21 @@ def render_hybrid_cards(display_df, key_prefix="hy"):
                 )
 
 
-def render_searched_movie_card(movie_id, title):
+def render_searched_movie_card(movie_id, title, genres):
     """Small highlighted card for the movie the user actually searched for --
     shown once above the recommendation grid so they can see what was
     matched (in case the search matched a different title than expected,
     e.g. searching "Toy Story" matches "Toy Story" over "Toy Story 2").
     Deliberately kept out of `render_hybrid_cards` -- that grid is only for
     the *recommended* (similar) movies, never the searched one itself.
+
+    Genre is shown here (on the searched movie) as context for what was
+    matched -- distinct from the recommendation cards below, which stay
+    genre-free per spec (genre/score there are analysis-only).
     """
     poster = poster_lookup.get(movie_id)
+    genre_list = [g for g in str(genres).split("|") if g and g != "(no genres listed)"]
+    genre_str = ", ".join(genre_list) if genre_list else "No genre listed"
     col = st.columns([1, 3, 1])[1]  # center a narrower column
     with col:
         if isinstance(poster, str) and poster.strip() != "":
@@ -543,7 +549,8 @@ def render_searched_movie_card(movie_id, title):
                 f'border-radius:12px; margin-bottom: 16px;">'
                 f'<img src="{poster}" style="width:70px; height:100px; object-fit:cover; border-radius:8px; flex-shrink:0;">'
                 f'<div><div style="font-size:0.8rem; color:#a0a0a0;">You searched for</div>'
-                f'<strong style="font-size:1.1rem;">{title}</strong></div></div>',
+                f'<strong style="font-size:1.1rem;">{title}</strong>'
+                f'<div style="font-size:0.85rem; color:#a0a0a0; margin-top:4px;">{genre_str}</div></div></div>',
                 unsafe_allow_html=True,
             )
         else:
@@ -551,7 +558,8 @@ def render_searched_movie_card(movie_id, title):
                 f'<div style="padding:12px; background: rgba(99, 102, 241, 0.08); '
                 f'border: 1px solid rgba(99, 102, 241, 0.3); border-radius:12px; margin-bottom: 16px;">'
                 f'<div style="font-size:0.8rem; color:#a0a0a0;">You searched for</div>'
-                f'<strong style="font-size:1.1rem;">{title}</strong></div>',
+                f'<strong style="font-size:1.1rem;">{title}</strong>'
+                f'<div style="font-size:0.85rem; color:#a0a0a0; margin-top:4px;">{genre_str}</div></div>',
                 unsafe_allow_html=True,
             )
 
@@ -576,7 +584,7 @@ with tab_hy:
         if meta.get("error"):
             st.warning(meta["error"])
         else:
-            render_searched_movie_card(meta["matched_movie_id"], meta["matched_title"])
+            render_searched_movie_card(meta["matched_movie_id"], meta["matched_title"], meta["matched_genres"])
             st.write(f"**Movies similar to {meta['matched_title']}:**")
             render_hybrid_cards(recs, "hy")
 

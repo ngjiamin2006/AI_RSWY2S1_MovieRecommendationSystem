@@ -118,23 +118,23 @@ def clean_text(text: str) -> str:
 def find_movie_by_search(movies, search_title: str):
     """Look up a single movie by cleaned-title substring match.
 
-    Returns (movieId, exact_title). Returns (None, None) on an empty
-    search or no match -- callers must handle both explicitly rather than
-    assume a match always exists (input validation).
+    Returns (movieId, exact_title, genres). Returns (None, None, None) on
+    an empty search or no match -- callers must handle both explicitly
+    rather than assume a match always exists (input validation).
     """
     query = clean_text(search_title)
     if not query:
-        return None, None
+        return None, None, None
 
     cleaned_titles = movies["title"].apply(clean_text)
     matches = movies[cleaned_titles.str.contains(query, na=False, regex=False)]
     if matches.empty:
-        return None, None
+        return None, None, None
 
     # Prefer the shortest matching title -- "Toy Story" over "Toy Story 2"
     # or "Toy Story 3" -- as the most likely intended exact match.
     best = matches.loc[matches["title"].str.len().idxmin()]
-    return int(best["movieId"]), best["title"]
+    return int(best["movieId"]), best["title"], best["genres"]
 
 
 def _normalize(arr: np.ndarray) -> np.ndarray:
@@ -244,7 +244,7 @@ def recommend_by_search(movies, content_matrix, user_item_matrix, movie_ids: np.
     alpha = min(max(alpha, 0.0), 1.0)  # defensive clamp -- a slider can't
     # send an out-of-range value, but this function shouldn't assume that.
 
-    target_movie_id, matched_title = find_movie_by_search(movies, search_title)
+    target_movie_id, matched_title, matched_genres = find_movie_by_search(movies, search_title)
     log_search(search_title, matched_title)
 
     if target_movie_id is None:
@@ -275,7 +275,10 @@ def recommend_by_search(movies, content_matrix, user_item_matrix, movie_ids: np.
     analysis = analysis.sort_values("score", ascending=False).reset_index(drop=True)
 
     display = analysis[["movieId", "title"]].copy()
-    meta = {"matched_title": matched_title, "matched_movie_id": target_movie_id, "analysis": analysis}
+    meta = {
+        "matched_title": matched_title, "matched_movie_id": target_movie_id,
+        "matched_genres": matched_genres, "analysis": analysis,
+    }
     return display, meta
 
 
