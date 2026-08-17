@@ -101,12 +101,14 @@ def clean_text(text: str) -> str:
     """Lowercase, strip digits/punctuation, and drop English stop words.
 
     Required preprocessing step for the assignment (grading checks input
-    validation/preprocessing explicitly). Applied here to the title the
-    user types into the search bar, so matching is robust to case,
-    stray digits, and filler words ("the", "of", ...) without needing any
-    change to how content_based.py / data_loader.py build the TF-IDF
-    features -- those already lowercase and stop-word-strip the *overview*
-    text on their own.
+    validation/preprocessing explicitly) -- kept here as the demonstrable
+    "stop words / numbers / lowercase" cleaning step. NOT used for title
+    search matching below: stop-word removal is meant for long-form prose
+    (plot overviews), and is actively wrong for short titles, since a
+    common word can be the whole distinguishing part of a title ("Back
+    TO THE Future" vs "The Future" -- "back" and "to" and "the" are all
+    English stop words, and stripping them collapses both titles to just
+    "future"). See _normalize_title for the matching-safe version.
     """
     if not isinstance(text, str):
         return ""
@@ -116,25 +118,83 @@ def clean_text(text: str) -> str:
     return " ".join(tokens)
 
 
-def find_movie_by_search(movies, search_title: str):
-    """Look up a single movie by cleaned-title substring match.
+_TRAILING_ARTICLE_RE = re.compile(r"^(.*),\s*(the|a|an)\s*$")
 
-    Returns (movieId, exact_title, genres). Returns (None, None, None) on
-    an empty search or no match -- callers must handle both explicitly
+
+def _normalize_title(text: str) -> str:
+    """Lowercase, strip the trailing "(YYYY)" year and punctuation, and
+    un-invert MovieLens's "Title, The (Year)" convention back to natural
+    word order ("Matrix, The" -> "the matrix") so a normal-language query
+    like "the matrix" can match it.
+
+    Deliberately keeps stop words ("Back to the Future" relies on "back"
+    and "to" and "the" -- clean_text's stop-word list would strip all
+    three and collide it with "The Future"). Full stop-word/number
+    stripping belongs to long-form content cleaning (clean_text above),
+    not title lookup.
+    """
+    if not isinstance(text, str):
+        return ""
+    text = text.lower().strip()
+    text = re.sub(r"\(\d{4}\)\s*$", "", text).strip()  # drop trailing (year)
+    m = _TRAILING_ARTICLE_RE.match(text)
+    if m:
+        text = f"{m.group(2)} {m.group(1)}"
+    text = re.sub(r"[^a-z0-9\s]", " ", text)  # strip remaining punctuation
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def find_movie_by_search(movies, search_title: str, popularity: np.ndarray | None = None,
+                          movie_id_to_row: dict | None = None):
+    """Look up a single movie by title.
+
+    Tries an exact (normalized) title match first (handles "the matrix" ->
+    "Matrix, The (1999)" via _normalize_title's article un-inversion).
+    Falls back to a whole-word match -- e.g. "war" matches "War of the
+    Worlds" but not "Warrior".
+
+    Multiple exact or whole-word matches are common ("Up (2009)" vs. the
+    obscure "Up! (1976)"; "Star Wars" the franchise vs. an unrelated fan
+    film called "Star Wars: Dresca") -- shortest-title alone isn't a good
+    enough proxy for "the one the user means". When `popularity` (a
+    rating-count array in `movie_ids`/`movie_id_to_row` order -- pass
+    `user_item_matrix.getnnz(axis=1)`) is available, ties are broken by
+    whichever match has the most ratings; otherwise falls back to
+    shortest title.
+
+    Returns (movieId, exact_title, genres), or (None, None, None) on an
+    empty search or no match -- callers must handle both explicitly
     rather than assume a match always exists (input validation).
     """
-    query = clean_text(search_title)
+    query = _normalize_title(search_title)
     if not query:
         return None, None, None
 
-    cleaned_titles = movies["title"].apply(clean_text)
-    matches = movies[cleaned_titles.str.contains(query, na=False, regex=False)]
+    normalized_titles = movies["title"].apply(_normalize_title)
+
+    def _pick_best(candidates):
+        if len(candidates) == 1 or popularity is None or movie_id_to_row is None:
+            return candidates.loc[candidates["title"].str.len().idxmin()]
+        pop_values = candidates["movieId"].map(
+            lambda mid: popularity[movie_id_to_row[mid]] if mid in movie_id_to_row else 0
+        )
+        if pop_values.max() == 0:
+            return candidates.loc[candidates["title"].str.len().idxmin()]
+        return candidates.loc[pop_values.idxmax()]
+
+    exact = movies[normalized_titles == query]
+    if not exact.empty:
+        best = _pick_best(exact)
+        return int(best["movieId"]), best["title"], best["genres"]
+
+    # Whole-word match only -- a raw substring match would let "up" match
+    # inside "Supercon" or "it" match inside "Ittefaq".
+    pattern = r"\b" + re.escape(query) + r"\b"
+    matches = movies[normalized_titles.str.contains(pattern, na=False, regex=True)]
     if matches.empty:
         return None, None, None
 
-    # Prefer the shortest matching title -- "Toy Story" over "Toy Story 2"
-    # or "Toy Story 3" -- as the most likely intended exact match.
-    best = matches.loc[matches["title"].str.len().idxmin()]
+    best = _pick_best(matches)
     return int(best["movieId"]), best["title"], best["genres"]
 
 
