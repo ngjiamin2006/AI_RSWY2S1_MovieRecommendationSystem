@@ -3,7 +3,7 @@
 Run with: streamlit run app.py
 """
 import streamlit as st  # type: ignore[missing-import]
-
+import pandas as pd
 from data_loader import (
     load_data, build_genre_matrix, build_user_item_matrix, get_popular_movies,
     get_most_rated_movies, get_new_releases, load_links, attach_tmdb_metadata,
@@ -301,14 +301,15 @@ def render_recommendations(df, key_prefix, show_score=True, score_label="score")
                     )
                 
                 score_str = ""
-                if show_score and "score" in row:
+                score_val = row.get("score") if "score" in row else row.get("rating")
+                if show_score and score_val is not None and not pd.isna(score_val):
                     # Using title() in case score_label is lowercase
                     label = score_label.title()
                     # If it's a count (like number of ratings), format as integer, else as a 2-decimal float
                     if label.lower() == "ratings" or "count" in label.lower():
-                        score_str = f"Total Reviews: {int(row['score']):,}"
+                        score_str = f"Total Reviews: {int(score_val):,}"
                     else:
-                        score_str = f"{label}: {row['score']:.2f}/5.0"
+                        score_str = f"{label}: {float(score_val):.2f}/5.0"
                 elif "release_date" in row:
                     score_str = f"Released: {row['release_date']}"
                 
@@ -683,7 +684,7 @@ with tab_ml:
                 st.info(explanation)
 
             if recs is not None and not recs.empty:
-                render_recommendations(recs, "cf")
+                render_recommendations(recs, "cf", score_label="Expected Rating")
             else:
                 st.warning("Falling back to standard Item-Based CF from the full dataset (no local users matched).")
                 recs_item_based = collaborative_filtering.recommend(
@@ -691,7 +692,7 @@ with tab_ml:
                     liked_movie_ids=st.session_state.liked_movie_ids, top_n=30,
                     allowed_ids=allowed_ids, **pool_kwargs,
                 )
-                render_recommendations(recs_item_based, "cf")
+                render_recommendations(recs_item_based, "cf", score_label="Expected Rating")
 
     elif model_option == "Hybrid":
         st.caption(
