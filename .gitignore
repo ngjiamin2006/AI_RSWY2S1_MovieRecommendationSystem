@@ -19,3 +19,6 @@ Thumbs.db
 movie-recommender/data/ml-25m/
 movie-recommender/data/tmdb/
 movie-recommender-data.zip
+
+# Recorded hybrid-tab search queries (backend log, not part of the app itself)
+movie-recommender/logs/
