@@ -194,6 +194,8 @@ year_lookup = pipeline["year_lookup"]
 if pipeline["tmdb_error"]:
     st.sidebar.warning(pipeline["tmdb_error"])
 
+if "feedbacks" not in st.session_state:
+    st.session_state.feedbacks = []
 if "local_profiles" not in st.session_state:
     st.session_state.local_profiles = {
         "User 1": [],
@@ -233,7 +235,20 @@ if "selected_genres" not in st.session_state:
 if "cb_matched_ids" not in st.session_state:
     st.session_state.cb_matched_ids = []
 
-st.title("Movie Recommender")
+title_col, stats_col = st.columns([5, 4])
+with title_col:
+    st.title("Movie Recommender")
+with stats_col:
+    st.markdown(
+        f"""
+        <div style='display: flex; justify-content: flex-end; gap: 30px; padding-top: 25px;'>
+            <div style='text-align: center;'><span style='color: #94a3b8; font-size: 0.85rem;'>Movies</span><br><span style='font-size: 1.2rem; font-weight: 600;'>{len(movies):,}</span></div>
+            <div style='text-align: center;'><span style='color: #94a3b8; font-size: 0.85rem;'>Ratings</span><br><span style='font-size: 1.2rem; font-weight: 600;'>{len(ratings):,}</span></div>
+            <div style='text-align: center;'><span style='color: #94a3b8; font-size: 0.85rem;'>Users</span><br><span style='font-size: 1.2rem; font-weight: 600;'>{ratings['userId'].nunique():,}</span></div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 
 def add_like(movie_id):
@@ -420,17 +435,48 @@ with st.sidebar:
                 
         st.rerun()
 
+def _best_match_recs(algorithm_name, pool_kwargs):
+    """Run whichever algorithm the Evaluation tab measured as having the highest F1@K."""
+    common = dict(
+        liked_movie_ids=st.session_state.liked_movie_ids,
+        top_n=30,
+        allowed_ids=allowed_ids,
+        **pool_kwargs,
+    )
+    if algorithm_name == "content_based":
+        return content_based.recommend(
+            movies, genre_matrix, movie_ids, movie_id_to_row, genre_names,
+            selected_genres=st.session_state.selected_genres, **common,
+        )
+    if algorithm_name == "content_based_tfidf" and tfidf_matrix is not None:
+        return content_based.recommend_tfidf(
+            movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer,
+            selected_genres=st.session_state.selected_genres, **common,
+        )
+    if algorithm_name == "collaborative":
+        return collaborative_filtering.recommend(
+            movies, user_item_matrix, movie_ids, movie_id_to_row, **common,
+        )
+    if algorithm_name == "hybrid_tfidf" and tfidf_matrix is not None:
+        return hybrid.recommend_tfidf(
+            movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer, user_item_matrix,
+            selected_genres=st.session_state.selected_genres, alpha=0.5, **common,
+        )
+    # "hybrid", or a fallback if the winning name needs TF-IDF data that isn't loaded
+    return hybrid.recommend(
+        movies, genre_matrix, movie_ids, movie_id_to_row, genre_names, user_item_matrix,
+        selected_genres=st.session_state.selected_genres, alpha=0.5, **common,
+    )
 
 
 
 
-(tab_home, tab_popular, tab_top_rated, tab_new, tab_cb, tab_cf, tab_hy, tab_eval) = st.tabs(
-    ["Home", "Popular", "Top Rated", "New Releases", "Content-Based",
-     "Collaborative Filtering", "Hybrid", "Evaluation"]
+(tab_home, tab_ml, tab_eval, tab_survey) = st.tabs(
+    ["Home", "Recommendations", "Evaluation", "Feedback"]
 )
 
 with tab_home:
-    st.subheader("Welcome back!")
+    st.subheader("Welcome to the Movie Recommendation System!")
     c1, c2, c3 = st.columns(3)
     c1.metric("Movies", f"{len(movies):,}")
     c2.metric("Ratings", f"{len(ratings):,}")
@@ -464,21 +510,52 @@ with tab_home:
         "back to genre-only similarity otherwise."
     )
 
-with tab_popular:
-    st.caption("Most-watched movies (highest number of ratings), regardless of average score.")
-    recs = get_most_rated_movies(movies, ratings, top_n=30, allowed_ids=allowed_ids)
-    render_recommendations(recs, "pop", score_label="ratings")
+    st.divider()
+    st.write("### Discover Movies")
+    discover_option = st.radio("Explore curated lists", ["Popular", "Top Rated", "New Releases"], horizontal=True, label_visibility="collapsed")
+    
+    if discover_option == "Popular":
+        st.caption("Most-watched movies (highest number of ratings), regardless of average score.")
+        recs = get_most_rated_movies(movies, ratings, top_n=30, allowed_ids=allowed_ids)
+        render_recommendations(recs, "pop", score_label="ratings")
+    elif discover_option == "Top Rated":
+        st.caption("Highest average rating among movies with enough votes to be reliable.")
+        render_recommendations(get_popular_movies(movies, ratings, top_n=30, allowed_ids=allowed_ids), "top", score_label="avg rating")
+    elif discover_option == "New Releases":
+        st.caption("Most recently released movies with TMDb metadata (requires the TMDb dataset).")
+        if tfidf_matrix is not None:
+            render_recommendations(get_new_releases(enriched, top_n=30, allowed_ids=allowed_ids), "new", show_score=False)
+        else:
+            st.info("New Releases needs the TMDb dataset (for release dates) -- see the sidebar warning above.")
 
-with tab_top_rated:
-    st.caption("Highest average rating among movies with enough votes to be reliable.")
-    render_recommendations(get_popular_movies(movies, ratings, top_n=30, allowed_ids=allowed_ids), "top", score_label="avg rating")
+with tab_ml:
+    st.write("### 🤖 AI Recommendation Models")
+    model_option = st.radio(
+        "Select an algorithm", 
+        ["🏆 Best Match (Auto-selected)", "Content-Based", "Collaborative Filtering", "Hybrid"],
+        horizontal=True,
+        label_visibility="collapsed"
+    )
+    
+    if model_option == "🏆 Best Match (Auto-selected)":
+        eval_results = st.session_state.get("eval_results")
+        eval_k = st.session_state.get("eval_k")
 
-with tab_new:
-    st.caption("Most recently released movies with TMDb metadata (requires the TMDb dataset).")
-    if tfidf_matrix is not None:
-        render_recommendations(get_new_releases(enriched, top_n=30, allowed_ids=allowed_ids), "new", show_score=False)
-    else:
-        st.info("New Releases needs the TMDb dataset (for release dates) -- see the sidebar warning above.")
+        if eval_results is None:
+            best_name = "hybrid_tfidf" if tfidf_matrix is not None else "hybrid"
+            st.warning(
+                "No evaluation has been run yet, so this defaults to Hybrid. "
+                "Run the **Evaluation** tab first so this picks whichever algorithm actually scores best."
+            )
+        else:
+            f1_col = f"f1@{eval_k}"
+            best_name = eval_results[f1_col].idxmax()
+            best_score = eval_results.loc[best_name, f1_col]
+            st.success(
+                f"Selected **{best_name}** -- highest F1@{eval_k} ({best_score:.3f}) "
+                f"among {len(eval_results)} algorithms tested in the Evaluation tab."
+            )
+        st.caption("Here are your top recommendations generated by the best-performing model.")
 
 def clear_cb_search():
     st.session_state.cb_search_input = ""
@@ -516,28 +593,45 @@ with tab_cf:
     search_and_like("cf_search_input", "cf_search")
     pool_kwargs = refresh_controls("cf")
 
-    if not st.session_state.liked_movie_ids:
-        # If the user hasn't liked anything, we don't need to try and fail multiple times.
-        # Just pass None to trigger the standard popular movies fallback.
-        render_recommendations(None, "cf")
-    else:
-        recs, explanation = collaborative_filtering.recommend_user_based(
-            movies, user_item_matrix, movie_ids, movie_id_to_row,
-            current_user=st.session_state.current_user,
-            local_profiles=st.session_state.local_profiles, top_n=30
-        )
-
-        if explanation:
-            st.info(explanation)
-
-        if recs is not None and not recs.empty:
-            render_recommendations(recs, "cf")
+        if not st.session_state.liked_movie_ids:
+            render_recommendations(None, "cf")
         else:
-            # Fall back to item-based if no user matches, or if we got None
-            st.warning("Falling back to standard Item-Based CF from the full dataset (no local users matched).")
-            recs_item_based = collaborative_filtering.recommend(
+            recs, explanation = collaborative_filtering.recommend_user_based(
                 movies, user_item_matrix, movie_ids, movie_id_to_row,
-                liked_movie_ids=st.session_state.liked_movie_ids, top_n=30,
+                current_user=st.session_state.current_user,
+                local_profiles=st.session_state.local_profiles, top_n=30
+            )
+
+            if explanation:
+                st.info(explanation)
+
+            if recs is not None and not recs.empty:
+                render_recommendations(recs, "cf")
+            else:
+                st.warning("Falling back to standard Item-Based CF from the full dataset (no local users matched).")
+                recs_item_based = collaborative_filtering.recommend(
+                    movies, user_item_matrix, movie_ids, movie_id_to_row,
+                    liked_movie_ids=st.session_state.liked_movie_ids, top_n=30,
+                    allowed_ids=allowed_ids, **pool_kwargs,
+                )
+                render_recommendations(recs_item_based, "cf")
+
+    elif model_option == "Hybrid":
+        st.caption("Blends the content-based and collaborative filtering scores.")
+        alpha = st.slider("Weight towards content-based (alpha)", 0.0, 1.0, 0.5, 0.1)
+        pool_kwargs = refresh_controls("hy")
+        if tfidf_matrix is not None:
+            recs = hybrid.recommend_tfidf(
+                movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer, user_item_matrix,
+                liked_movie_ids=st.session_state.liked_movie_ids,
+                selected_genres=st.session_state.selected_genres, top_n=30, alpha=alpha,
+                allowed_ids=allowed_ids, **pool_kwargs,
+            )
+        else:
+            recs = hybrid.recommend(
+                movies, genre_matrix, movie_ids, movie_id_to_row, genre_names, user_item_matrix,
+                liked_movie_ids=st.session_state.liked_movie_ids,
+                selected_genres=st.session_state.selected_genres, top_n=30, alpha=alpha,
                 allowed_ids=allowed_ids, **pool_kwargs,
             )
             render_recommendations(recs_item_based, "cf")
@@ -648,8 +742,8 @@ with tab_hy:
                    + ", ".join(st.session_state.hy_recent_searches[-5:]))
 
 with tab_eval:
-    st.caption("Offline evaluation on a held-out test split of real ratings -- this is what goes in your report.")
-    st.info("Evaluation on ml-25m is slower (~5s per user) due to the size of the ratings matrix -- keep max users modest.")
+    st.caption("📊 **Offline Evaluation**: The system hides 20% of historical user ratings and tests if our algorithms can correctly predict them. This generates the accuracy scores for your report.")
+    st.info("⚠️ **Note on Speed**: Collaborative Filtering has to search through millions of data points to find similar users. It takes about 3-5 seconds per user. **To test faster, reduce 'Max users to sample' to 10 or 15.**")
     k = st.number_input("K (top-K for precision/recall/F1)", min_value=5, max_value=20, value=10, step=5)
     max_users = st.number_input("Max users to sample", min_value=10, max_value=200, value=30, step=10)
     if st.button("Run evaluation"):
@@ -657,9 +751,110 @@ with tab_eval:
             train_ratings, test_ratings = evaluation.train_test_split_ratings(ratings)
             links = load_links(dataset=DATASET) if tmdb_available() else None
             results = evaluation.evaluate_all(movies, train_ratings, test_ratings, k=k, max_users=max_users, links=links)
+        st.session_state.eval_results = results
+        st.session_state.eval_k = k
+
+    # Rendered from session_state (not just after the click) so results survive
+    # switching tabs -- st.tabs() re-executes every tab's code on every rerun,
+    # and st.button() only returns True on the one rerun it was clicked.
+    if st.session_state.get("eval_results") is not None:
+        results = st.session_state.eval_results
+        eval_k = st.session_state.eval_k
         st.dataframe(results)
-        st.bar_chart(results[[f"precision@{k}", f"recall@{k}", f"f1@{k}"]])
+        st.bar_chart(results[[f"precision@{eval_k}", f"recall@{eval_k}", f"f1@{eval_k}"]])
         st.bar_chart(results[["coverage", "diversity"]])
+
+        st.write("#### Rating Prediction Metrics (All Algorithms)")
+        metrics_df = results[["rmse", "mse", "mae", "accuracy_within_1star"]].dropna(how='all')
+        if not metrics_df.empty:
+            st.dataframe(metrics_df)
+
+
+
+# tab_best has been moved inside tab_ml
+
+with tab_survey:
+    st.subheader("📝 User Feedback Questionnaire")
+    st.write("We'd love to hear your thoughts on how the system works!")
+    
+    with st.form("feedback_form"):
+        options = ["1 - Very Bad", "2 - Bad", "3 - Middle", "4 - Good", "5 - Very Good"]
+        rec_quality_str = st.radio("1. How accurate are our recommendations today?", options, index=2, horizontal=True)
+        sys_ui_str = st.radio("2. How do you like the user interface?", options, index=3, horizontal=True)
+        sys_perf_str = st.radio("3. How smooth is the system performance?", options, index=3, horizontal=True)
+        comments = st.text_area("Any additional comments?")
+        submitted = st.form_submit_button("Submit Feedback")
+        
+        if submitted:
+            rec_quality = int(rec_quality_str.split(" - ")[0])
+            sys_ui = int(sys_ui_str.split(" - ")[0])
+            sys_perf = int(sys_perf_str.split(" - ")[0])
+            
+            st.session_state.feedbacks.append({
+                "Quality": rec_quality,
+                "UI Design": sys_ui,
+                "Performance": sys_perf,
+                "Comments": comments
+            })
+            st.success("Thank you for your feedback!")
+            
+    # Demo data generator -- for presentations only, when there's no time to collect
+    # real responses live. Scores span the full 1-5 range (not skewed positive) and
+    # every generated comment is tagged "[DEMO]" so it's never mistaken for a real
+    # response -- clear it out with the button below before submitting a report.
+    demo_col, clear_col = st.columns(2)
+    with demo_col:
+        generate_demo = st.button("🚀 Generate 10 Demo Feedbacks (For Presentation)")
+    with clear_col:
+        if st.button("🗑️ Clear all feedback"):
+            st.session_state.feedbacks = []
+            st.rerun()
+
+    if generate_demo:
+        import random
+        demo_comments = [
+            "Great system! The recommendations are very accurate.",
+            "I love the UI, it's very sleek.",
+            "A bit slow when computing, but good movies.",
+            "The hybrid model really works well for me.",
+            "Not bad, but missing some very niche movies.",
+            "Recommendations felt off for my taste a few times.",
+            "Super easy to use, great onboarding.",
+            "The performance could be a bit faster.",
+            "I love the dark mode design and gradient title.",
+            "Decent overall, but the filters could be clearer.",
+        ]
+        for c in demo_comments:
+            st.session_state.feedbacks.append({
+                "Quality": random.randint(1, 5),
+                "UI Design": random.randint(1, 5),
+                "Performance": random.randint(1, 5),
+                "Comments": f"[DEMO] {c}",
+            })
+        st.rerun()
+
+    if st.session_state.feedbacks:
+        st.divider()
+        st.write("### Feedback Summary")
+        import pandas as pd
+        feedback_df = pd.DataFrame(st.session_state.feedbacks)
+        avg_scores = feedback_df[["Quality", "UI Design", "Performance"]].mean()
+        overall_score = avg_scores.mean()
+        
+        st.metric(label="Overall System Satisfaction", value=f"{overall_score:.1f} / 5.0")
+        
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            st.write("#### Average Scores")
+            st.dataframe(avg_scores.rename("Score"))
+        with c2:
+            st.write("#### Score Distribution")
+            st.bar_chart(avg_scores)
+            
+        with st.expander("View Recent Comments"):
+            for fb in reversed(st.session_state.feedbacks[-5:]):
+                if fb["Comments"]:
+                    st.info(f"**Quality: {fb['Quality']}/5 | UI Design: {fb['UI Design']}/5 | Performance: {fb['Performance']}/5**\n\n{fb['Comments']}")
 
 st.caption(TMDB_ATTRIBUTION)
 
