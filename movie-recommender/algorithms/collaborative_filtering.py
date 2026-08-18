@@ -6,10 +6,30 @@ from scipy.sparse import csr_matrix
 from algorithms.ranking import select_top_n
 
 
+def compute_cf_scores(user_item_matrix: csr_matrix, movie_id_to_row: dict,
+                       liked_movie_ids: list[int] | None) -> np.ndarray:
+    """Mean cosine similarity of every movie to the user's liked movies (via shared raters).
+
+    This is the expensive (n_liked x n_users) x (n_movies x n_users) similarity
+    call. Pulled out so evaluation.py can compute it once per user and hand the
+    result to recommend() and hybrid.py's blended recommenders via `_cf_scores`,
+    instead of each one recomputing it independently.
+    """
+    n_movies = user_item_matrix.shape[0]
+    liked_rows = [movie_id_to_row[mid] for mid in (liked_movie_ids or []) if mid in movie_id_to_row]
+    if not liked_rows:
+        return np.zeros(n_movies)
+
+    liked_vectors = user_item_matrix[liked_rows]  # (n_liked, n_users)
+    sims = cosine_similarity(liked_vectors, user_item_matrix)  # (n_liked, n_movies)
+    return sims.mean(axis=0)  # average similarity to each liked movie
+
+
 @st.cache_data(show_spinner=False)
 def recommend(_movies, _user_item_matrix: csr_matrix, _movie_ids: np.ndarray, _movie_id_to_row: dict,
               liked_movie_ids: list[int] | None = None, top_n: int = 10,
-              allowed_ids: set | None = None, pool_size: int | None = None, sample_seed: int | None = None):
+              allowed_ids: set | None = None, pool_size: int | None = None, sample_seed: int | None = None,
+              _cf_scores: np.ndarray | None = None):
 
     if not liked_movie_ids:
         return None
@@ -18,9 +38,9 @@ def recommend(_movies, _user_item_matrix: csr_matrix, _movie_ids: np.ndarray, _m
     if not liked_rows:
         return None
 
-    liked_vectors = _user_item_matrix[liked_rows]  # (n_liked, n_users)
-    sims = cosine_similarity(liked_vectors, _user_item_matrix)  # (n_liked, n_movies)
-    scores = sims.mean(axis=0)  # average similarity to each liked movie
+    scores = _cf_scores if _cf_scores is not None else compute_cf_scores(
+        _user_item_matrix, _movie_id_to_row, liked_movie_ids
+    )
 
     exclude = set(liked_movie_ids)
     positive_mask = scores > 0
