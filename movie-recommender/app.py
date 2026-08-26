@@ -435,8 +435,24 @@ with st.sidebar:
                 
         st.rerun()
 
+@st.cache_data(show_spinner=False)
+def _run_evaluation(_movies, _ratings, _links, k, max_users, dataset):
+    """Cached so re-running the Evaluation tab with the same K/Max-users/dataset
+    is instant instead of redoing the split + all four algorithms from scratch
+    -- evaluate_all()'s default seed is fixed, so results are identical anyway.
+    """
+    train_ratings, test_ratings = evaluation.train_test_split_ratings(_ratings)
+    return evaluation.evaluate_all(_movies, train_ratings, test_ratings, k=k, max_users=max_users, links=_links)
+
+
 def _best_match_recs(algorithm_name, pool_kwargs):
-    """Run whichever algorithm the Evaluation tab measured as having the highest F1@K."""
+    """Run whichever algorithm the Evaluation tab measured as having the highest F1@K.
+
+    content_based is search-driven only (per tutor feedback, never
+    Like-button-driven), so unlike the other three it can't take
+    liked_movie_ids as its query -- mirrors evaluation.py's own stand-in:
+    the most recently liked movie becomes the search query.
+    """
     common = dict(
         liked_movie_ids=st.session_state.liked_movie_ids,
         top_n=30,
@@ -444,14 +460,12 @@ def _best_match_recs(algorithm_name, pool_kwargs):
         **pool_kwargs,
     )
     if algorithm_name == "content_based":
-        return content_based.recommend(
-            movies, genre_matrix, movie_ids, movie_id_to_row, genre_names,
-            selected_genres=st.session_state.selected_genres, **common,
-        )
-    if algorithm_name == "content_based_tfidf" and tfidf_matrix is not None:
-        return content_based.recommend_tfidf(
-            movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer,
-            selected_genres=st.session_state.selected_genres, **common,
+        if not st.session_state.liked_movie_ids:
+            return None
+        seed_movie_id = st.session_state.liked_movie_ids[-1]
+        return content_based.recommend_by_search(
+            movies, cb_matrix, movie_ids, movie_id_to_row,
+            matched_movie_ids=[seed_movie_id], top_n=30, allowed_ids=allowed_ids, **pool_kwargs,
         )
     if algorithm_name == "collaborative":
         return collaborative_filtering.recommend(
@@ -739,9 +753,8 @@ with tab_eval:
     max_users = st.number_input("Max users to sample", min_value=10, max_value=200, value=30, step=10)
     if st.button("Run evaluation"):
         with st.spinner("Splitting data and scoring all algorithms..."):
-            train_ratings, test_ratings = evaluation.train_test_split_ratings(ratings)
             links = load_links(dataset=DATASET) if tmdb_available() else None
-            results = evaluation.evaluate_all(movies, train_ratings, test_ratings, k=k, max_users=max_users, links=links)
+            results = _run_evaluation(movies, ratings, links, k, max_users, DATASET)
         st.session_state.eval_results = results
         st.session_state.eval_k = k
 
