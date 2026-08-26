@@ -316,39 +316,63 @@ def build_tfidf_matrix(movies_enriched: pd.DataFrame, max_features: int = 5000,
     return movie_ids, matrix, vectorizer
 
 
-def build_cb_overview_matrix(movies_enriched: pd.DataFrame, max_features: int = 5000):
-    """Genre + overview TF-IDF matrix for the Content-Based tab's movie-to-movie
-    search: similarity is based on genre + synopsis/overview text only, with
-    explicit lowercase/number/stopword cleanup (see text_utils.clean_text)
-    rather than TfidfVectorizer's implicit stop_words default.
+def build_cb_overview_matrix(movies_enriched: pd.DataFrame, max_features: int = 5000,
+                              tag_weight: float = 0.7, overview_weight: float = 0.3):
+    """Genre+keywords+cast+director + overview TF-IDF matrix for the
+    Content-Based tab's movie-to-movie search.
 
-    Deliberately independent of build_tfidf_matrix/build_content_soup (which
-    additionally blend keywords/cast/director and are relied on by
-    hybrid.py and evaluation.py) -- this function only ever ADDS a pipeline,
+    Two weighted fields, vectorized separately then combined -- same
+    pattern as build_tfidf_matrix, so tag_weight/overview_weight directly
+    control each field's share of the cosine similarity score downstream:
+    - tags: genre + keywords + top-5 cast + director (short, decisive
+      tokens -- catches affinities plot text alone would miss, e.g. "this
+      user likes everything a given director makes").
+    - overview: TMDb plot summary prose.
+    Both explicitly lowercase/strip-digits/strip-stopwords via
+    text_utils.clean_text rather than TfidfVectorizer's implicit stop_words
+    default, and both include bigrams (ngram_range=(1, 2)) so phrases like
+    "time travel" match as a unit, not just as scattered unigrams.
+
+    Deliberately independent of build_tfidf_matrix (used by hybrid.py and
+    evaluation.py's other rows) -- this function only ever ADDS a pipeline,
     it never changes those.
 
-    Works with or without TMDb: if "overview" isn't a column (TMDb not
-    downloaded), overview text is empty for every row and similarity falls
-    back to genre-only -- same graceful-degradation pattern as the rest of
-    the app.
+    Works with or without TMDb: if TMDb columns aren't present, keywords/
+    cast/director/overview are all empty and similarity falls back to
+    genre-only -- same graceful-degradation pattern as the rest of the app.
 
     Returns:
         movie_ids: array of movieId, in the same row order as `movies` (this
             function is always called on `enriched`, which preserves
             `movies`' row order -- see attach_tmdb_metadata's docstring).
-        matrix: sparse (n_movies, n_features) TF-IDF matrix
-        vectorizer: fitted TfidfVectorizer (kept for symmetry/debugging)
+        matrix: sparse (n_movies, n_tag_features + n_overview_features) matrix
+        vectorizer: fitted tag TfidfVectorizer (kept for symmetry/debugging;
+            no caller currently re-embeds new text through it)
     """
-    genre_text = movies_enriched["genre_list"].apply(
-        lambda gs: " ".join(clean_text(g) for g in gs)
-    )
+    def tags_text(row):
+        tokens = list(row["genre_list"])
+        if isinstance(row.get("keywords_list"), list):
+            tokens += row["keywords_list"]
+        if isinstance(row.get("cast_names"), list):
+            tokens += row["cast_names"][:5]  # top-billed cast only
+        if pd.notna(row.get("director")):
+            tokens.append(row["director"])
+        # Each token kept as one unit ("Tom Hanks" -> "tomhanks") so a
+        # person's name or multi-word keyword isn't split into separately
+        # matchable words -- same convention as build_content_soup.
+        return " ".join(clean_text(str(t).replace(" ", "")) for t in tokens)
+
+    tag_text = movies_enriched.apply(tags_text, axis=1)
+    tag_vectorizer = TfidfVectorizer(max_features=max_features, lowercase=False, ngram_range=(1, 2))
+    tag_matrix = tag_vectorizer.fit_transform(tag_text) * tag_weight
+
     overview_text = (
         movies_enriched["overview"] if "overview" in movies_enriched.columns
         else pd.Series("", index=movies_enriched.index)
-    )
-    combined = (genre_text + " " + overview_text.apply(clean_text)).str.strip()
+    ).apply(clean_text)
+    overview_vectorizer = TfidfVectorizer(max_features=max_features, lowercase=False, ngram_range=(1, 2))
+    overview_matrix = overview_vectorizer.fit_transform(overview_text) * overview_weight
 
-    vectorizer = TfidfVectorizer(max_features=max_features, lowercase=False)
-    matrix = vectorizer.fit_transform(combined)
+    matrix = hstack([tag_matrix, overview_matrix]).tocsr()
     movie_ids = movies_enriched["movieId"].to_numpy()
-    return movie_ids, matrix, vectorizer
+    return movie_ids, matrix, tag_vectorizer

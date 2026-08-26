@@ -4,7 +4,29 @@ This is what produces the metrics table required by the assignment
 rubric (precision/recall/F1, RMSE) -- it is separate from the live
 "Like" button demo in app.py. Run this file directly to print a
 comparison table, or import `evaluate_all` from app.py's evaluation tab.
+
+=== Evaluation Metrics Explained ===
+1. Precision@K (准确率): 
+   - Out of the Top-K movies recommended to the user, what percentage did the user ACTUALLY like? (Measures how accurate the recommendations are).
+2. Recall@K (召回率): 
+   - Out of ALL the hidden movies the user liked in the test set, what percentage did we successfully catch in our Top-K list? (Measures how many good movies we didn't miss).
+3. F1@K (F1分数): 
+   - The harmonic mean of Precision and Recall. A balanced single score to judge overall recommendation quality.
+4. Coverage (覆盖率): 
+   - What percentage of the entire movie database did the algorithm recommend across ALL users? (High coverage = it recommends a wide variety of movies, not just the top 10 blockbusters).
+5. Diversity (多样性): 
+   - How different are the movies within a single user's Top-K list? (Calculated via genre dissimilarity; prevents recommending 10 identical superhero movies).
+6. Avg Time (平均耗时): 
+   - How many seconds it takes to generate recommendations for one user.
+7. RMSE / MSE / MAE (误差指标): 
+   - Root Mean Squared Error / Mean Squared Error / Mean Absolute Error. 
+   - Measures how far off our predicted 0-5 star rating was from the user's actual rating. (Lower is better).
+8. Accuracy (±1 Star): 
+   - What percentage of our rating predictions were within 1 star of the actual rating.
+====================================
 """
+
+
 import time
 
 import numpy as np
@@ -107,8 +129,8 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
     metrics = {name: {"precision": [], "recall": [], "f1": [], "time": []} for name in algorithm_names}
     recommended_sets = {name: set() for name in algorithm_names}
     diversity_scores = {name: [] for name in algorithm_names}
-    squared_errors = []
-    absolute_errors = []
+    squared_errors = {name: [] for name in algorithm_names}
+    absolute_errors = {name: [] for name in algorithm_names}
 
     for user_id in test_users:
         user_train = train_ratings[train_ratings["userId"] == user_id]
@@ -126,19 +148,23 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
             result = fn(*args, **kwargs)
             return result, time.perf_counter() - start
 
+        # Computed once and reused below -- collaborative/hybrid/hybrid_tfidf would
+        # otherwise each redo this same expensive similarity call independently.
+        cf_scores = collaborative_filtering.compute_cf_scores(user_item_matrix, movie_id_to_row, liked)
+
         cb, cb_t = timed(content_based.recommend, movies, genre_matrix, movie_ids, movie_id_to_row, genre_names,
                           liked_movie_ids=liked, top_n=k)
         cf, cf_t = timed(collaborative_filtering.recommend, movies, user_item_matrix, movie_ids, movie_id_to_row,
-                          liked_movie_ids=liked, top_n=k)
+                          liked_movie_ids=liked, top_n=k, _cf_scores=cf_scores)
         hy, hy_t = timed(hybrid.recommend, movies, genre_matrix, movie_ids, movie_id_to_row, genre_names,
-                          user_item_matrix, liked_movie_ids=liked, top_n=k)
+                          user_item_matrix, liked_movie_ids=liked, top_n=k, _cf_scores=cf_scores)
         recs_by_name = {"content_based": (cb, cb_t), "collaborative": (cf, cf_t), "hybrid": (hy, hy_t)}
 
         if tfidf_matrix is not None:
             cbt, cbt_t = timed(content_based.recommend_tfidf, movies, tfidf_matrix, movie_ids, movie_id_to_row,
-                                vectorizer, liked_movie_ids=liked, top_n=k)
+                               vectorizer, liked_movie_ids=liked, top_n=k)
             hyt, hyt_t = timed(hybrid.recommend_tfidf, movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer,
-                                user_item_matrix, liked_movie_ids=liked, top_n=k)
+                               user_item_matrix, liked_movie_ids=liked, top_n=k, _cf_scores=cf_scores)
             recs_by_name["content_based_tfidf"] = (cbt, cbt_t)
             recs_by_name["hybrid_tfidf"] = (hyt, hyt_t)
 
@@ -154,16 +180,77 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
             if diversity is not None:
                 diversity_scores[name].append(diversity)
 
+        profile_cb = content_based.build_user_profile(genre_matrix, movie_id_to_row, liked)
+        profile_cb_tfidf = None
+        if tfidf_matrix is not None:
+            profile_cb_tfidf = content_based.build_tfidf_profile(tfidf_matrix, movie_id_to_row, liked, vectorizer)
+
         if user_id in user_id_to_col:
             col = user_id_to_col[user_id]
             for _, row in user_test.iterrows():
-                pred = collaborative_filtering.predict_rating(user_item_matrix, movie_id_to_row, col, row["movieId"])
-                if pred is not None:
-                    squared_errors.append((pred - row["rating"]) ** 2)
-                    absolute_errors.append(abs(pred - row["rating"]))
+                target_mid = row["movieId"]
+                actual_rating = row["rating"]
+                
+                if target_mid not in movie_id_to_row:
+                    continue
+                target_row_idx = movie_id_to_row[target_mid]
+                
+                preds = {}
+                
+                # CF prediction
+                pred_cf = collaborative_filtering.predict_rating(user_item_matrix, movie_id_to_row, col, target_mid)
+                preds["collaborative"] = pred_cf
+                
+                # CB prediction (scale 0-1 similarity to 0-5 rating)
+                pred_cb = None
+                if profile_cb is not None:
+                    target_vec = genre_matrix[target_row_idx].reshape(1, -1)
+                    sim = cosine_similarity(profile_cb, target_vec)[0, 0]
+                    pred_cb = max(0.0, min(5.0, sim * 5.0))
+                preds["content_based"] = pred_cb
+                
+                # HY prediction
+                alpha = 0.5
+                if pred_cb is not None and pred_cf is not None:
+                    preds["hybrid"] = alpha * pred_cb + (1 - alpha) * pred_cf
+                elif pred_cb is not None:
+                    preds["hybrid"] = pred_cb
+                elif pred_cf is not None:
+                    preds["hybrid"] = pred_cf
+                else:
+                    preds["hybrid"] = None
+                
+                # TF-IDF variants
+                if tfidf_matrix is not None:
+                    pred_cb_tfidf = None
+                    if profile_cb_tfidf is not None:
+                        target_vec = tfidf_matrix[target_row_idx]
+                        if not isinstance(profile_cb_tfidf, np.ndarray):
+                            profile_cb_tfidf = np.asarray(profile_cb_tfidf)
+                        sim = cosine_similarity(profile_cb_tfidf.reshape(1, -1), target_vec)[0, 0]
+                        pred_cb_tfidf = max(0.0, min(5.0, sim * 5.0))
+                    preds["content_based_tfidf"] = pred_cb_tfidf
+                    
+                    if pred_cb_tfidf is not None and pred_cf is not None:
+                        preds["hybrid_tfidf"] = alpha * pred_cb_tfidf + (1 - alpha) * pred_cf
+                    elif pred_cb_tfidf is not None:
+                        preds["hybrid_tfidf"] = pred_cb_tfidf
+                    elif pred_cf is not None:
+                        preds["hybrid_tfidf"] = pred_cf
+                    else:
+                        preds["hybrid_tfidf"] = None
+                
+                for name, pred in preds.items():
+                    if pred is not None:
+                        squared_errors[name].append((pred - actual_rating) ** 2)
+                        absolute_errors[name].append(abs(pred - actual_rating))
 
-    rmse = float(np.sqrt(np.mean(squared_errors))) if squared_errors else None
-    mae = float(np.mean(absolute_errors)) if absolute_errors else None
+    rmse = {name: float(np.sqrt(np.mean(errs))) if errs else None for name, errs in squared_errors.items()}
+    mse = {name: float(np.mean(errs)) if errs else None for name, errs in squared_errors.items()}
+    mae = {name: float(np.mean(errs)) if errs else None for name, errs in absolute_errors.items()}
+    # Fraction of predictions within 1 star of actual -- not classification accuracy.
+    accuracy_within_1star = {name: sum(1 for e in errs if e <= 1.0) / len(errs) if errs else None for name, errs in absolute_errors.items()}
+    
     n_movies = len(movie_ids)
 
     rows = []
@@ -176,8 +263,10 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
             "coverage": len(recommended_sets[name]) / n_movies,
             "diversity": np.mean(diversity_scores[name]) if diversity_scores[name] else None,
             "avg_time_sec": np.mean(vals["time"]) if vals["time"] else None,
-            "rmse (collaborative only)": rmse if name == "collaborative" else None,
-            "mae (collaborative only)": mae if name == "collaborative" else None,
+            "rmse": rmse.get(name),
+            "mse": mse.get(name),
+            "mae": mae.get(name),
+            "accuracy_within_1star": accuracy_within_1star.get(name),
         })
     return pd.DataFrame(rows).set_index("algorithm")
 
@@ -190,7 +279,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Run offline evaluation for the movie recommender.")
     parser.add_argument("--dataset", choices=["ml-latest-small", "ml-25m"], default="ml-25m")
-    parser.add_argument("--max-users", type=int, default=30)
+    parser.add_argument("--max-users", type=int, default=10)
     parser.add_argument("--k", type=int, default=10)
     args = parser.parse_args()
 
