@@ -1,3 +1,9 @@
+"""Collaborative Filtering Recommender System.
+
+This module implements both Item-Based Collaborative Filtering (for general recommendations)
+and User-Based Collaborative Filtering (for local user profiles), utilizing cosine similarity 
+and Maximal Marginal Relevance (MMR) for diverse results.
+"""
 import numpy as np
 import streamlit as st
 from sklearn.metrics.pairwise import cosine_similarity
@@ -8,21 +14,24 @@ from algorithms.ranking import select_top_n
 
 def compute_cf_scores(user_item_matrix: csr_matrix, movie_id_to_row: dict,
                        liked_movie_ids: list[int] | None) -> np.ndarray:
-    """Mean cosine similarity of every movie to the user's liked movies (via shared raters).
-
-    This is the expensive (n_liked x n_users) x (n_movies x n_users) similarity
-    call. Pulled out so evaluation.py can compute it once per user and hand the
-    result to recommend() and hybrid.py's blended recommenders via `_cf_scores`,
-    instead of each one recomputing it independently.
+    """Compute Item-Based Collaborative Filtering similarity scores.
+    
+    Calculates the average cosine similarity between the movies the user liked 
+    and all other movies in the dataset based on global user rating patterns.
     """
     n_movies = user_item_matrix.shape[0]
     liked_rows = [movie_id_to_row[mid] for mid in (liked_movie_ids or []) if mid in movie_id_to_row]
+    
+    # Return zero scores if no valid liked movies are found
     if not liked_rows:
         return np.zeros(n_movies)
 
-    liked_vectors = user_item_matrix[liked_rows]  # (n_liked, n_users)
-    sims = cosine_similarity(liked_vectors, user_item_matrix)  # (n_liked, n_movies)
-    return sims.mean(axis=0)  # average similarity to each liked movie
+    # Extract vectors for the liked movies and compute similarity against all movies
+    liked_vectors = user_item_matrix[liked_rows]  # Shape: (n_liked, n_users)
+    sims = cosine_similarity(liked_vectors, user_item_matrix)  # Shape: (n_liked, n_movies)
+    
+    # Return the average similarity to each liked movie
+    return sims.mean(axis=0)
 
 
 @st.cache_data(show_spinner=False)
@@ -30,7 +39,11 @@ def recommend(_movies, _user_item_matrix: csr_matrix, _movie_ids: np.ndarray, _m
               liked_movie_ids: list[int] | None = None, top_n: int = 10,
               allowed_ids: set | None = None, pool_size: int | None = None, sample_seed: int | None = None,
               _cf_scores: np.ndarray | None = None):
-
+    """Generate recommendations using Item-Based Collaborative Filtering.
+    
+    This function is primarily used by the 'Best Match' and 'Hybrid' models. 
+    It filters candidates based on `allowed_ids` and uses `select_top_n` to return the final list.
+    """
     if not liked_movie_ids:
         return None
 
@@ -38,18 +51,25 @@ def recommend(_movies, _user_item_matrix: csr_matrix, _movie_ids: np.ndarray, _m
     if not liked_rows:
         return None
 
+    # Use pre-computed scores if provided, otherwise compute them
     scores = _cf_scores if _cf_scores is not None else compute_cf_scores(
         _user_item_matrix, _movie_id_to_row, liked_movie_ids
     )
 
+    # Exclude movies the user has already liked
     exclude = set(liked_movie_ids)
     positive_mask = scores > 0
+    
+    # Restrict candidate movies to those allowed by the global filters (e.g., Year/Quality filters)
     candidate_allowed = set(_movie_ids[positive_mask]) if allowed_ids is None else allowed_ids & set(_movie_ids[positive_mask])
+    
+    # Rank and select the top N movies
     results = select_top_n(scores, _movie_ids, exclude, candidate_allowed, top_n, pool_size, sample_seed)
 
     if not results:
         return None
 
+    # Construct the final dataframe with movie details and calculated ratings
     out = _movies[_movies["movieId"].isin(results)][["movieId", "title", "genres"]].copy()
     out["rating"] = out["movieId"].map(lambda mid: scores[_movie_id_to_row[mid]])
     return out.sort_values("rating", ascending=False).reset_index(drop=True)
@@ -57,19 +77,26 @@ def recommend(_movies, _user_item_matrix: csr_matrix, _movie_ids: np.ndarray, _m
 
 def predict_rating(user_item_matrix: csr_matrix, movie_id_to_row: dict, user_col: int,
                     target_movie_id: int, k: int = 20) -> float | None:
-
+    """Predict the exact star rating a user would give to a target movie.
+    
+    Used strictly for offline evaluation metrics (RMSE/MAE). It finds the top-K 
+    most similar movies (that the user has already rated) and computes a weighted average.
+    """
     if target_movie_id not in movie_id_to_row:
         return None
     target_row = movie_id_to_row[target_movie_id]
 
+    # Find all movies the user has rated
     user_rated_rows = user_item_matrix[:, user_col].nonzero()[0]
     if len(user_rated_rows) == 0:
         return None
 
+    # Calculate similarity between the target movie and the user's rated movies
     target_vector = user_item_matrix[target_row]
     candidate_vectors = user_item_matrix[user_rated_rows]
     sims = cosine_similarity(target_vector, candidate_vectors)[0]
 
+    # Select the Top-K most similar movies for the prediction
     top_k_idx = np.argsort(-sims)[:k]
     top_sims = sims[top_k_idx]
     top_rows = user_rated_rows[top_k_idx]
@@ -77,50 +104,78 @@ def predict_rating(user_item_matrix: csr_matrix, movie_id_to_row: dict, user_col
 
     if top_sims.sum() <= 0:
         return None
+        
+    # Return the weighted average rating
     return float(np.dot(top_sims, top_ratings) / top_sims.sum())
 
 
 def _apply_mmr(cf_scores, _movie_ids, _user_item_matrix, candidate_indices, top_n=10, lambda_param=0.3, pool_size=50):
+    """Apply Maximal Marginal Relevance (MMR) to diversify recommendation results.
+    
+    MMR balances relevance (high CF score) with diversity (low similarity to already 
+    selected items). This prevents recommending lists of overly identical movies.
+    """
     if not candidate_indices:
         return []
+        
     candidate_indices = candidate_indices[:pool_size]
     if len(candidate_indices) <= 1:
         return [_movie_ids[idx] for idx in candidate_indices][:top_n]
+        
+    # Compute item-to-item similarity among the candidates to penalize redundancy
     candidate_vectors = _user_item_matrix[candidate_indices]
     item_sim_matrix = cosine_similarity(candidate_vectors)
+    
     selected_indices = []
     selected_mids = []
+    
+    # Greedily select items that maximize the MMR score
     while len(selected_mids) < top_n and len(selected_mids) < len(candidate_indices):
         best_mmr = -float('inf')
         best_cand_idx = -1
         best_real_idx = -1
+        
         for i, real_idx in enumerate(candidate_indices):
             if i in selected_indices:
                 continue
+                
             relevance = cf_scores[real_idx]
+            # Penalty is based on the maximum similarity to any already selected item
             penalty = np.max(item_sim_matrix[i, selected_indices]) if selected_indices else 0.0
+            
+            # MMR Formula
             mmr_score = (1 - lambda_param) * relevance - lambda_param * penalty
+            
             if mmr_score > best_mmr:
                 best_mmr = mmr_score
                 best_cand_idx = i
                 best_real_idx = real_idx
+                
         if best_cand_idx == -1:
             break
+            
         selected_indices.append(best_cand_idx)
         selected_mids.append(_movie_ids[best_real_idx])
+        
     return selected_mids
 
 
 @st.cache_data(show_spinner=False)
 def recommend_user_based(_movies, _user_item_matrix: csr_matrix, _movie_ids: np.ndarray, _movie_id_to_row: dict,
                             current_user: str, local_profiles: dict, top_n: int = 10):
+    """User-Based Collaborative Filtering for the Interactive Demo Tab.
+    
+    Finds other local dummy users (e.g., 'User 2') with similar tastes using Jaccard similarity. 
+    It recommends movies they liked that the current user hasn't seen yet. If no user match 
+    is found, it gracefully falls back to Item-Based CF padded with MMR for diversity.
+    """
     my_likes = set(local_profiles.get(current_user, []))
     if not my_likes:
         return None, "You haven't liked any movies yet. Like some movies to see collaborative recommendations!"
 
     my_set = set(my_likes)
     
-    # Calculate similarity (Jaccard) with other local users
+    # Phase 1: Calculate Jaccard similarity with other local profiles
     best_match_user = None
     best_match_score = 0.0
     best_match_likes = []
@@ -135,6 +190,7 @@ def recommend_user_based(_movies, _user_item_matrix: csr_matrix, _movie_ids: np.
         if not (their_set - my_set):
             continue
             
+        # Jaccard similarity formula: Intersection over Union
         intersection = len(my_set & their_set)
         union = len(my_set | their_set)
         jaccard = intersection / union if union > 0 else 0
@@ -144,20 +200,22 @@ def recommend_user_based(_movies, _user_item_matrix: csr_matrix, _movie_ids: np.
             best_match_user = other_user
             best_match_likes = their_likes
 
+    # Phase 2: Compute Item-Based CF scores as a fallback
     liked_rows = [_movie_id_to_row[mid] for mid in my_likes if mid in _movie_id_to_row]
     cf_scores = np.zeros(len(_movie_ids))
+    
     if liked_rows:
         liked_vectors = _user_item_matrix[liked_rows]
         cf_scores = cosine_similarity(liked_vectors, _user_item_matrix).mean(axis=0)
 
-    # Determine candidates for item-based fallback (must be unseen and have CF score > 0)
+    # Determine candidates for item-based fallback (must be unseen and have a CF score > 0)
     order = np.argsort(-cf_scores)
     allowed_candidates = [idx for idx in order if _movie_ids[idx] not in my_set and cf_scores[idx] > 0]
-    
     max_cf = np.max(cf_scores) if np.max(cf_scores) > 0 else 1.0
 
+    # Handle case where no similar user was found
     if not best_match_user or best_match_score == 0:
-        # No local user match: use MMR on item-based candidates for diverse results
+        # Use MMR on item-based candidates for diverse results
         item_based_recs = _apply_mmr(cf_scores, _movie_ids, _user_item_matrix, allowed_candidates, top_n=top_n)
         
         if not item_based_recs:
@@ -171,7 +229,7 @@ def recommend_user_based(_movies, _user_item_matrix: csr_matrix, _movie_ids: np.
     # User match found: Recommend what the best match liked (that I haven't seen)
     user_based_recs = [mid for mid in best_match_likes if mid not in my_set]
 
-    # Pad with diverse item-based recommendations using MMR
+    # Pad the remaining slots with diverse item-based recommendations using MMR
     remaining_n = top_n - len(user_based_recs)
     padding_candidates = [idx for idx in allowed_candidates if _movie_ids[idx] not in user_based_recs]
     item_based_recs = _apply_mmr(cf_scores, _movie_ids, _user_item_matrix, padding_candidates, top_n=remaining_n) if remaining_n > 0 else []
@@ -185,10 +243,10 @@ def recommend_user_based(_movies, _user_item_matrix: csr_matrix, _movie_ids: np.
     # Build the dataframe for recommendations
     out = _movies[_movies["movieId"].isin(final_recs)][["movieId", "title", "genres"]].copy()
     
-    # Scale Expected Ratings (User match = ~4.5 to 5.0, Item fallback = 3.5 to 4.5)
+    # Scale Expected Ratings for display (User match = ~4.5 to 5.0, Item fallback = 3.5 to 4.5)
     def get_rating(mid):
         if mid in user_based_recs:
-            return 4.5 + (0.5 * best_match_score)  # e.g., 80% match -> 4.9 stars
+            return 4.5 + (0.5 * best_match_score)  # Example: 80% Jaccard match -> 4.9 stars
         return 3.5 + 1.0 * (cf_scores[_movie_id_to_row[mid]] / max_cf)
         
     out["rating"] = out["movieId"].map(get_rating)

@@ -133,7 +133,6 @@ div.stButton > button:first-child:hover {
 </style>
 """, unsafe_allow_html=True)
 
-TMDB_ATTRIBUTION = "This product uses the TMDB API but is not endorsed or certified by TMDB."
 DATASET = "ml-25m"
 
 
@@ -169,6 +168,7 @@ def load_pipeline(dataset: str):
         dict(zip(enriched["movieId"], enriched.get("poster_url", []))) if "poster_url" in enriched.columns else {}
     )
     year_lookup = build_year_lookup(enriched)
+    movie_avg_ratings = ratings.groupby("movieId")["rating"].mean().to_dict()
 
     return {
         "movies": movies, "ratings": ratings, "enriched": enriched,
@@ -177,7 +177,16 @@ def load_pipeline(dataset: str):
         "user_id_to_col": user_id_to_col, "tfidf_matrix": tfidf_matrix, "vectorizer": vectorizer,
         "cb_matrix": cb_matrix,
         "poster_lookup": poster_lookup, "tmdb_error": tmdb_error, "year_lookup": year_lookup,
+        "movie_avg_ratings": movie_avg_ratings,
     }
+
+
+@st.cache_data(show_spinner=False)
+def run_cached_evaluation(_movies, _ratings, dataset_name, k, max_users):
+    train_ratings, test_ratings = evaluation.train_test_split_ratings(_ratings)
+    links = load_links(dataset=dataset_name) if tmdb_available() else None
+    results = evaluation.evaluate_all(_movies, train_ratings, test_ratings, k=k, max_users=max_users, links=links)
+    return results
 
 
 pipeline = load_pipeline(DATASET)
@@ -190,6 +199,7 @@ tfidf_matrix, vectorizer = pipeline["tfidf_matrix"], pipeline["vectorizer"]
 cb_matrix = pipeline["cb_matrix"]
 poster_lookup = pipeline["poster_lookup"]
 year_lookup = pipeline["year_lookup"]
+movie_avg_ratings = pipeline["movie_avg_ratings"]
 
 if pipeline["tmdb_error"]:
     st.sidebar.warning(pipeline["tmdb_error"])
@@ -216,17 +226,37 @@ with st.sidebar:
     max_yr = col2.number_input("To", min_value=year_bounds[0], max_value=year_bounds[1], value=year_bounds[1], step=1)
     year_range = (int(min_yr), int(max_yr))
 
-# Only treat this as an active filter once the user narrows it -- at the
-# full default range, filtering by year_lookup would also silently exclude
-# the handful of movies with no known year at all (no TMDb match and no
-# parseable year in the title).
+    st.write("### Quality Filter")
+    st.caption("Prevent algorithms from recommending low-rated movies.")
+    min_rating = st.slider("Minimum Rating", 0.0, 5.0, 3.0, 0.5)
+
+# Calculate year filter IDs
 year_filter_active = year_range != year_bounds
-allowed_ids = (
+year_allowed_ids = (
     {mid for mid, y in year_lookup.items() if year_range[0] <= y <= year_range[1]}
     if year_filter_active else None
 )
-if year_filter_active:
-    st.sidebar.caption(f"Showing only movies released {year_range[0]}-{year_range[1]} ({len(allowed_ids):,} eligible).")
+
+# Calculate quality filter IDs
+quality_filter_active = min_rating > 0.0
+quality_allowed_ids = (
+    {mid for mid, avg in movie_avg_ratings.items() if avg >= min_rating}
+    if quality_filter_active else None
+)
+
+# Combine filters
+if not year_filter_active and not quality_filter_active:
+    allowed_ids = None
+elif year_filter_active and not quality_filter_active:
+    allowed_ids = year_allowed_ids
+elif not year_filter_active and quality_filter_active:
+    allowed_ids = quality_allowed_ids
+else:
+    allowed_ids = year_allowed_ids.intersection(quality_allowed_ids)
+
+if year_filter_active or quality_filter_active:
+    if allowed_ids is not None:
+        st.sidebar.caption(f"Showing movies matching filters ({len(allowed_ids):,} eligible).")
 
 if "liked_movie_ids" not in st.session_state:
     st.session_state.liked_movie_ids = st.session_state.local_profiles[st.session_state.current_user]
@@ -308,6 +338,8 @@ def render_recommendations(df, key_prefix, show_score=True, score_label="score")
                     # If it's a count (like number of ratings), format as integer, else as a 2-decimal float
                     if label.lower() == "ratings" or "count" in label.lower():
                         score_str = f"Total Reviews: {int(score_val):,}"
+                    elif label.lower() == "similarity" or (label.lower() == "score" and score_val <= 1.0):
+                        score_str = f"Similarity: {float(score_val)*100:.0f}%"
                     else:
                         score_str = f"{label}: {float(score_val):.2f}/5.0"
                 elif "release_date" in row:
@@ -374,16 +406,23 @@ def search_and_like(text_key, render_prefix, help_text="Click 'Like' to add them
     parameterized so each tab's search box/results use independent
     session-state keys (each tab can be searched and tested separately).
     """
-    query = st.text_input("Enter movie title...", placeholder="e.g. Inception or Toy Story", key=text_key)
+    with st.form(key=f"{text_key}_form"):
+        col1, col2 = st.columns([5, 1])
+        with col1:
+            query = st.text_input("Enter movie title...", placeholder="e.g. Inception or Toy Story", key=text_key)
+        with col2:
+            st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+            st.form_submit_button("Search", use_container_width=True)
+            
     if query:
         results = movies[movies['title'].str.contains(query, case=False, na=False)].head(20)
         if results.empty:
             st.warning(f"No movies found matching '{query}'.")
         else:
             st.success(f"Found {len(results)} movies. {help_text}")
-            render_recommendations(results, render_prefix, show_score=False)
-    else:
-        st.info("Type a movie name above to search for specific movies to like.")
+            results = results.copy()
+            results["score"] = results["movieId"].map(movie_avg_ratings)
+            render_recommendations(results, render_prefix, score_label="Average Rating")
 
 
 def search_movies_cb(text_key="cb_search_input", render_prefix="cb_search"):
@@ -394,10 +433,17 @@ def search_movies_cb(text_key="cb_search_input", render_prefix="cb_search"):
     stored as cb_matched_ids -- unlike search_and_like(), nothing is
     appended to liked_movie_ids.
     """
-    query = st.text_input(
-        "Search movies by title keyword...",
-        placeholder="e.g. Inception or Marvel", key=text_key,
-    )
+    with st.form(key=f"{text_key}_form"):
+        col1, col2 = st.columns([5, 1])
+        with col1:
+            query = st.text_input(
+                "Search movies by title keyword...",
+                placeholder="e.g. Inception or Marvel", key=text_key,
+            )
+        with col2:
+            st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+            st.form_submit_button("Search", use_container_width=True)
+            
     if query:
         matches = movies[movies['title'].str.contains(query, case=False, na=False)].head(20)
         if matches.empty:
@@ -405,11 +451,12 @@ def search_movies_cb(text_key="cb_search_input", render_prefix="cb_search"):
             st.session_state.cb_matched_ids = []
         else:
             st.success(f"Found {len(matches)} movies matching '{query}'.")
-            render_recommendations(matches, render_prefix, show_score=False)
+            matches = matches.copy()
+            matches["score"] = matches["movieId"].map(movie_avg_ratings)
+            render_recommendations(matches, render_prefix, score_label="Average Rating")
             st.session_state.cb_matched_ids = matches['movieId'].tolist()
     else:
         st.session_state.cb_matched_ids = []
-        st.info("Type a keyword above and press Enter to get content-based recommendations.")
 
 
 with st.sidebar:
@@ -436,24 +483,8 @@ with st.sidebar:
                 
         st.rerun()
 
-@st.cache_data(show_spinner=False)
-def _run_evaluation(_movies, _ratings, _links, k, max_users, dataset):
-    """Cached so re-running the Evaluation tab with the same K/Max-users/dataset
-    is instant instead of redoing the split + all four algorithms from scratch
-    -- evaluate_all()'s default seed is fixed, so results are identical anyway.
-    """
-    train_ratings, test_ratings = evaluation.train_test_split_ratings(_ratings)
-    return evaluation.evaluate_all(_movies, train_ratings, test_ratings, k=k, max_users=max_users, links=_links)
-
-
 def _best_match_recs(algorithm_name, pool_kwargs):
-    """Run whichever algorithm the Evaluation tab measured as having the highest F1@K.
-
-    content_based is search-driven only (per tutor feedback, never
-    Like-button-driven), so unlike the other three it can't take
-    liked_movie_ids as its query -- mirrors evaluation.py's own stand-in:
-    the most recently liked movie becomes the search query.
-    """
+    """Run whichever algorithm the Evaluation tab measured as having the highest F1@K."""
     common = dict(
         liked_movie_ids=st.session_state.liked_movie_ids,
         top_n=30,
@@ -461,12 +492,14 @@ def _best_match_recs(algorithm_name, pool_kwargs):
         **pool_kwargs,
     )
     if algorithm_name == "content_based":
-        if not st.session_state.liked_movie_ids:
-            return None
-        seed_movie_id = st.session_state.liked_movie_ids[-1]
-        return content_based.recommend_by_search(
-            movies, cb_matrix, movie_ids, movie_id_to_row,
-            matched_movie_ids=[seed_movie_id], top_n=30, allowed_ids=allowed_ids, **pool_kwargs,
+        return content_based.recommend(
+            movies, genre_matrix, movie_ids, movie_id_to_row, genre_names,
+            selected_genres=st.session_state.selected_genres, **common,
+        )
+    if algorithm_name == "content_based_tfidf" and tfidf_matrix is not None:
+        return content_based.recommend_tfidf(
+            movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer,
+            selected_genres=st.session_state.selected_genres, **common,
         )
     if algorithm_name == "collaborative":
         return collaborative_filtering.recommend(
@@ -484,86 +517,6 @@ def _best_match_recs(algorithm_name, pool_kwargs):
     )
 
 
-def clear_cb_search():
-    st.session_state.cb_search_input = ""
-    st.session_state.cb_matched_ids = []
-
-
-def render_hybrid_cards(display_df, key_prefix="hy"):
-    """Frontend rendering for the search-driven hybrid results.
-
-    Deliberately minimal compared to render_recommendations() -- poster +
-    title only. No score, no genre: those live in meta["analysis"] for the
-    report/backend, not the recommendation cards (per spec).
-    """
-    if display_df is None or display_df.empty:
-        return
-    cols_per_row = 5
-    for i in range(0, len(display_df), cols_per_row):
-        cols = st.columns(cols_per_row)
-        chunk = display_df.iloc[i:i + cols_per_row]
-        for col, (_, row) in zip(cols, chunk.iterrows()):
-            with col:
-                poster = poster_lookup.get(row["movieId"])
-                title = row["title"]
-                if isinstance(poster, str) and poster.strip() != "":
-                    st.markdown(
-                        f'<div class="movie-poster-card" style="height:350px; margin-bottom:12px;">'
-                        f'<img src="{poster}" style="width:100%; height:100%; object-fit:cover; border-radius:12px; box-shadow:0 4px 12px rgba(0,0,0,0.5);">'
-                        f'</div>', unsafe_allow_html=True,
-                    )
-                else:
-                    st.markdown(
-                        f'<div class="movie-poster-card" style="height:350px; display:flex; align-items:center; justify-content:center; '
-                        f'background: linear-gradient(135deg, #1A202C, #0f131c); border-radius:12px; '
-                        f'margin-bottom:12px; box-shadow:0 4px 12px rgba(0,0,0,0.5); padding: 15px; text-align: center; border: 1px solid rgba(255,255,255,0.02);">'
-                        f'<span style="color: #94a3b8; font-size: 1.2rem; font-weight: 600; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;">'
-                        f'{title}</span></div>', unsafe_allow_html=True,
-                    )
-                st.markdown(
-                    f'<div style="height: 40px; display: flex; align-items: flex-start; margin-bottom: 10px;">'
-                    f'<strong style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-overflow: ellipsis; font-size: 1rem; line-height: 1.2;">'
-                    f'{title}</strong></div>', unsafe_allow_html=True,
-                )
-
-
-def render_searched_movie_card(movie_id, title, genres):
-    """Small highlighted card for the movie the user actually searched for --
-    shown once above the recommendation grid so they can see what was
-    matched (in case the search matched a different title than expected,
-    e.g. searching "Toy Story" matches "Toy Story" over "Toy Story 2").
-    Deliberately kept out of `render_hybrid_cards` -- that grid is only for
-    the *recommended* (similar) movies, never the searched one itself.
-
-    Genre is shown here (on the searched movie) as context for what was
-    matched -- distinct from the recommendation cards below, which stay
-    genre-free per spec (genre/score there are analysis-only).
-    """
-    poster = poster_lookup.get(movie_id)
-    genre_list = [g for g in str(genres).split("|") if g and g != "(no genres listed)"]
-    genre_str = ", ".join(genre_list) if genre_list else "No genre listed"
-    col = st.columns([1, 3, 1])[1]  # center a narrower column
-    with col:
-        if isinstance(poster, str) and poster.strip() != "":
-            st.markdown(
-                f'<div style="display:flex; gap:16px; align-items:center; padding:12px; '
-                f'background: rgba(99, 102, 241, 0.08); border: 1px solid rgba(99, 102, 241, 0.3); '
-                f'border-radius:12px; margin-bottom: 16px;">'
-                f'<img src="{poster}" style="width:70px; height:100px; object-fit:cover; border-radius:8px; flex-shrink:0;">'
-                f'<div><div style="font-size:0.8rem; color:#a0a0a0;">You searched for</div>'
-                f'<strong style="font-size:1.1rem;">{title}</strong>'
-                f'<div style="font-size:0.85rem; color:#a0a0a0; margin-top:4px;">{genre_str}</div></div></div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                f'<div style="padding:12px; background: rgba(99, 102, 241, 0.08); '
-                f'border: 1px solid rgba(99, 102, 241, 0.3); border-radius:12px; margin-bottom: 16px;">'
-                f'<div style="font-size:0.8rem; color:#a0a0a0;">You searched for</div>'
-                f'<strong style="font-size:1.1rem;">{title}</strong>'
-                f'<div style="font-size:0.85rem; color:#a0a0a0; margin-top:4px;">{genre_str}</div></div>',
-                unsafe_allow_html=True,
-            )
 
 
 def clear_cb_search():
@@ -659,34 +612,6 @@ with tab_home:
     c3.metric("Users", f"{ratings['userId'].nunique():,}")
     
     st.divider()
-    
-    st.write("### Search Movies")
-    search_and_like("search_input", "search")
-
-    st.divider()
-    st.write("### What do you like to watch?")
-    st.caption("Pick a few genres you enjoy (Cold Start Preferences).")
-    
-    # Genre Checkbox Grid
-    genre_cols = st.columns(4)
-    new_selected_genres = []
-    
-    for i, g in enumerate(genre_names):
-        with genre_cols[i % 4]:
-            is_checked = st.checkbox(g, value=(g in st.session_state.selected_genres), key=f"genre_chk_{g}")
-            if is_checked:
-                new_selected_genres.append(g)
-                
-    st.session_state.selected_genres = new_selected_genres
-    
-    st.caption(
-        "Content-Based now works by searching for a movie directly (see its tab) -- it no longer uses "
-        "Likes or these genre picks. Collaborative Filtering and Hybrid still use your Likes/genre picks, "
-        "with TMDb-enriched TF-IDF features (overview/keywords/cast/director) when available, falling "
-        "back to genre-only similarity otherwise."
-    )
-
-    st.divider()
     st.write("### Discover Movies")
     discover_option = st.radio("Explore curated lists", ["Popular", "Top Rated", "New Releases"], horizontal=True, label_visibility="collapsed")
     
@@ -705,37 +630,48 @@ with tab_home:
             st.info("New Releases needs the TMDb dataset (for release dates) -- see the sidebar warning above.")
 
 with tab_ml:
-    st.write("### 🤖 AI Recommendation Models")
+    st.write("### AI Recommendation Models")
     model_option = st.radio(
-        "Select an algorithm",
-        ["🏆 Best Match (Auto-selected)", "Content-Based", "Collaborative Filtering", "Hybrid"],
+        "Select an algorithm", 
+        ["Best Match (Auto-selected)", "Content-Based", "Collaborative Filtering", "Hybrid"],
         horizontal=True,
         label_visibility="collapsed"
     )
-
-    if model_option == "🏆 Best Match (Auto-selected)":
+    
+    if model_option == "Best Match (Auto-selected)":
         eval_results = st.session_state.get("eval_results")
         eval_k = st.session_state.get("eval_k")
 
         if eval_results is None:
-            best_name = "hybrid_tfidf" if tfidf_matrix is not None else "hybrid"
-            st.warning(
-                "No evaluation has been run yet, so this defaults to Hybrid. "
-                "Run the **Evaluation** tab first so this picks whichever algorithm actually scores best."
-            )
+            st.warning("Please run the **Evaluation** tab first to unlock this feature! It will automatically select the best algorithm based on your test results.")
         else:
             f1_col = f"f1@{eval_k}"
             best_name = eval_results[f1_col].idxmax()
             best_score = eval_results.loc[best_name, f1_col]
+            
+            algo_display_names = {
+                "collaborative": "Collaborative Filtering",
+                "content_based": "Content-Based (Genre)",
+                "content_based_tfidf": "Content-Based (TF-IDF)",
+                "hybrid": "Hybrid",
+                "hybrid_tfidf": "Hybrid (TF-IDF)"
+            }
+            display_name = algo_display_names.get(best_name, best_name)
+            
             st.success(
-                f"Selected **{best_name}** -- highest F1@{eval_k} ({best_score:.3f}) "
+                f"Selected **{display_name}** — highest F1@{eval_k} ({best_score:.3f}) "
                 f"among {len(eval_results)} algorithms tested in the Evaluation tab."
             )
-        st.caption("Here are your top recommendations generated by the best-performing model.")
-
-        pool_kwargs = refresh_controls("best")
-        recs_best = _best_match_recs(best_name, pool_kwargs)
-        render_recommendations(recs_best, "best")
+            st.caption("Here are your top recommendations generated by the best-performing model.")
+            
+            cc1, cc2 = st.columns([5, 1])
+            with cc1:
+                st.write("### Recommended for you")
+            with cc2:
+                pool_kwargs = refresh_controls("best")
+                
+            recs = _best_match_recs(best_name, pool_kwargs)
+            render_recommendations(recs, "best")
 
     elif model_option == "Content-Based":
         st.caption(
@@ -751,13 +687,14 @@ with tab_ml:
         matched_ids = st.session_state.cb_matched_ids
         if matched_ids:
             st.divider()
-            cc1, cc2 = st.columns([5, 1])
+            cc1, cc2, cc3 = st.columns([4, 1, 1])
             with cc1:
                 st.write("### You might like these...")
             with cc2:
-                st.button("Clear", key="cb_clear_query", on_click=clear_cb_search)
+                pool_kwargs = refresh_controls("cb")
+            with cc3:
+                st.button("Clear Search", key="cb_clear_query", on_click=clear_cb_search, use_container_width=True)
 
-            pool_kwargs = refresh_controls("cb")
             recs = content_based.recommend_by_search(
                 movies, cb_matrix, movie_ids, movie_id_to_row,
                 matched_movie_ids=matched_ids, top_n=30, allowed_ids=allowed_ids, **pool_kwargs,
@@ -765,13 +702,19 @@ with tab_ml:
             render_recommendations(recs, "cb")
 
     elif model_option == "Collaborative Filtering":
-        st.caption("Interactive Demo: Recommends movies liked by other Local Users with similar taste to you.")
+        st.caption("Uses User-Based Collaborative Filtering to find users with similar tastes and recommends their highly-rated movies.")
         search_and_like("cf_search_input", "cf_search")
-        pool_kwargs = refresh_controls("cf")
 
+        st.divider()
         if not st.session_state.liked_movie_ids:
             render_recommendations(None, "cf")
         else:
+            cc1, cc2 = st.columns([5, 1])
+            with cc1:
+                st.write("### Recommended for you")
+            with cc2:
+                pool_kwargs = refresh_controls("cf")
+                
             recs, explanation = collaborative_filtering.recommend_user_based(
                 movies, user_item_matrix, movie_ids, movie_id_to_row,
                 current_user=st.session_state.current_user,
@@ -800,9 +743,15 @@ with tab_ml:
         alpha = st.slider("Weight towards content-based (alpha)", 0.0, 1.0, 0.5, 0.1, key="hy_alpha")
         content_matrix = tfidf_matrix if tfidf_matrix is not None else genre_matrix
 
-        hy_search = st.text_input(
-            "Search a movie title...", placeholder="e.g. Inception or Toy Story", key="hy_search_input"
-        )
+        with st.form(key="hy_search_form"):
+            col1, col2 = st.columns([5, 1])
+            with col1:
+                hy_search = st.text_input(
+                    "Search a movie title...", placeholder="e.g. Inception or Toy Story", key="hy_search_input"
+                )
+            with col2:
+                st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+                st.form_submit_button("Search", use_container_width=True)
 
         if hy_search:
             recs, meta = hybrid.recommend_by_search(
@@ -830,13 +779,10 @@ with tab_ml:
 
 with tab_eval:
     st.caption("📊 **Offline Evaluation**: The system hides 20% of historical user ratings and tests if our algorithms can correctly predict them. This generates the accuracy scores for your report.")
-    st.info("⚠️ **Note on Speed**: Collaborative Filtering has to search through millions of data points to find similar users. It takes about 3-5 seconds per user. **To test faster, reduce 'Max users to sample' to 10 or 15.**")
-    k = st.number_input("K (top-K for precision/recall/F1)", min_value=5, max_value=20, value=10, step=5)
-    max_users = st.number_input("Max users to sample", min_value=10, max_value=200, value=30, step=10)
+    k = st.number_input("K (top-K for precision/recall/F1)", min_value=5, max_value=20, value=5, step=5)
+    max_users = st.number_input("Max users to sample", min_value=5, max_value=200, value=5, step=5)
     if st.button("Run evaluation"):
-        with st.spinner("Splitting data and scoring all algorithms..."):
-            links = load_links(dataset=DATASET) if tmdb_available() else None
-            results = _run_evaluation(movies, ratings, links, k, max_users, DATASET)
+        results = run_cached_evaluation(movies, ratings, DATASET, k, max_users)
         st.session_state.eval_results = results
         st.session_state.eval_k = k
 
@@ -846,12 +792,40 @@ with tab_eval:
     if st.session_state.get("eval_results") is not None:
         results = st.session_state.eval_results
         eval_k = st.session_state.eval_k
-        st.dataframe(results)
-        st.bar_chart(results[[f"precision@{eval_k}", f"recall@{eval_k}", f"f1@{eval_k}"]])
-        st.bar_chart(results[["coverage", "diversity"]])
+        
+        # Beautify everything for display
+        display_results = results.copy()
+        
+        algo_names = {
+            "collaborative": "Collaborative Filtering",
+            "content_based": "Content-Based (Genre)",
+            "content_based_tfidf": "Content-Based (TF-IDF)",
+            "hybrid": "Hybrid",
+            "hybrid_tfidf": "Hybrid (TF-IDF)"
+        }
+        display_results.index = display_results.index.map(lambda x: algo_names.get(x, x))
+        display_results.index.name = "Algorithm"
+        
+        col_names = {
+            f"precision@{eval_k}": f"Precision@{eval_k}",
+            f"recall@{eval_k}": f"Recall@{eval_k}",
+            f"f1@{eval_k}": f"F1@{eval_k}",
+            "coverage": "Coverage",
+            "diversity": "Diversity",
+            "avg_time_sec": "Avg Time (s)",
+            "rmse": "RMSE",
+            "mse": "MSE",
+            "mae": "MAE",
+            "accuracy_within_1star": "Accuracy (±1 Star)"
+        }
+        display_results.rename(columns=col_names, inplace=True)
+
+        st.dataframe(display_results)
+        st.bar_chart(display_results[[f"Precision@{eval_k}", f"Recall@{eval_k}", f"F1@{eval_k}"]])
+        st.bar_chart(display_results[["Coverage", "Diversity"]])
 
         st.write("#### Rating Prediction Metrics (All Algorithms)")
-        metrics_df = results[["rmse", "mse", "mae", "accuracy_within_1star"]].dropna(how='all')
+        metrics_df = display_results[["RMSE", "MSE", "MAE", "Accuracy (±1 Star)"]].dropna(how='all')
         if not metrics_df.empty:
             st.dataframe(metrics_df)
 
@@ -941,8 +915,6 @@ with tab_survey:
             for fb in reversed(st.session_state.feedbacks[-5:]):
                 if fb["Comments"]:
                     st.info(f"**Quality: {fb['Quality']}/5 | UI Design: {fb['UI Design']}/5 | Performance: {fb['Performance']}/5**\n\n{fb['Comments']}")
-
-st.caption(TMDB_ATTRIBUTION)
 
 with st.sidebar:
     with st.expander("👥 View All Users' Profiles", expanded=False):

@@ -1,16 +1,32 @@
-"""Offline evaluation of all three algorithms: content-based, collaborative
-filtering, and hybrid (genre + TF-IDF variants).
+"""Offline evaluation shared by all three algorithms.
 
 This is what produces the metrics table required by the assignment
-rubric (precision/recall/F1, RMSE). Content-based is search-driven only
-per tutor feedback (never Like-button-driven), so it can't be fed a
-liked_movie_ids profile like the other two -- instead each test user's
-single highest-rated training movie stands in as "the movie they searched
-for" (see the `seed_movie_id` comment below), and it's scored against the
-exact same held-out relevant set as everyone else. Run this file directly
-to print a comparison table, or import `evaluate_all` from app.py's
-evaluation tab.
+rubric (precision/recall/F1, RMSE) -- it is separate from the live
+"Like" button demo in app.py. Run this file directly to print a
+comparison table, or import `evaluate_all` from app.py's evaluation tab.
+
+=== Evaluation Metrics Explained ===
+1. Precision@K (准确率): 
+   - Out of the Top-K movies recommended to the user, what percentage did the user ACTUALLY like? (Measures how accurate the recommendations are).
+2. Recall@K (召回率): 
+   - Out of ALL the hidden movies the user liked in the test set, what percentage did we successfully catch in our Top-K list? (Measures how many good movies we didn't miss).
+3. F1@K (F1分数): 
+   - The harmonic mean of Precision and Recall. A balanced single score to judge overall recommendation quality.
+4. Coverage (覆盖率): 
+   - What percentage of the entire movie database did the algorithm recommend across ALL users? (High coverage = it recommends a wide variety of movies, not just the top 10 blockbusters).
+5. Diversity (多样性): 
+   - How different are the movies within a single user's Top-K list? (Calculated via genre dissimilarity; prevents recommending 10 identical superhero movies).
+6. Avg Time (平均耗时): 
+   - How many seconds it takes to generate recommendations for one user.
+7. RMSE / MSE / MAE (误差指标): 
+   - Root Mean Squared Error / Mean Squared Error / Mean Absolute Error. 
+   - Measures how far off our predicted 0-5 star rating was from the user's actual rating. (Lower is better).
+8. Accuracy (±1 Star): 
+   - What percentage of our rating predictions were within 1 star of the actual rating.
+====================================
 """
+
+
 import time
 
 import numpy as np
@@ -19,7 +35,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 from data_loader import (
     load_data, build_genre_matrix, build_user_item_matrix,
-    load_tmdb_metadata, attach_tmdb_metadata, build_tfidf_matrix, build_cb_overview_matrix,
+    load_tmdb_metadata, attach_tmdb_metadata, build_tfidf_matrix,
 )
 from algorithms import content_based, collaborative_filtering, hybrid
 
@@ -79,11 +95,12 @@ def intra_list_diversity(recommended_ids: list, genre_matrix: np.ndarray, movie_
 def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: int = 100, seed: int = 42,
                   links: pd.DataFrame | None = None):
     """Compute precision/recall/F1@K, coverage, and diversity for all algorithms,
-    plus RMSE/MAE and per-call recommendation time.
+    plus RMSE/MAE and per-call recommendation time for collaborative filtering.
 
     If `links` (links.csv) is provided, also evaluates the TMDb-enriched
-    TF-IDF hybrid variant (`hybrid_tfidf`) alongside the genre-only one,
-    so the two feature sets can be compared side by side in the same table.
+    TF-IDF content-based and hybrid variants (`content_based_tfidf`,
+    `hybrid_tfidf`) alongside the original genre-only ones, so the two
+    feature sets can be compared side by side in the same table.
 
     - Coverage: fraction of the whole catalog that appears at least once
       across every test user's recommendation list for that algorithm.
@@ -96,18 +113,13 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
     movie_ids, genre_matrix, genre_names = build_genre_matrix(movies)
     user_item_matrix, movie_id_to_row, user_id_to_col = build_user_item_matrix(train_ratings, movie_ids)
 
-    algorithm_names = ["collaborative", "content_based", "hybrid"]
+    algorithm_names = ["content_based", "collaborative", "hybrid"]
     tfidf_matrix = vectorizer = None
-    # content-based's own genre+overview search matrix -- built unconditionally
-    # (degrades to genre-only without TMDb, same as the live Content-Based tab).
-    enriched = movies
     if links is not None:
         enriched = attach_tmdb_metadata(movies, links)
         tfidf_movie_ids, tfidf_matrix, vectorizer = build_tfidf_matrix(enriched)
         assert (tfidf_movie_ids == movie_ids).all(), "TF-IDF row order must match genre_matrix row order"
-        algorithm_names += ["hybrid_tfidf"]
-    cb_search_movie_ids, cb_matrix, _ = build_cb_overview_matrix(enriched)
-    assert (cb_search_movie_ids == movie_ids).all(), "content-based matrix row order must match genre_matrix row order"
+        algorithm_names += ["content_based_tfidf", "hybrid_tfidf"]
 
     rng = np.random.default_rng(seed)
     test_users = test_ratings["userId"].unique()
@@ -140,25 +152,20 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
         # otherwise each redo this same expensive similarity call independently.
         cf_scores = collaborative_filtering.compute_cf_scores(user_item_matrix, movie_id_to_row, liked)
 
+        cb, cb_t = timed(content_based.recommend, movies, genre_matrix, movie_ids, movie_id_to_row, genre_names,
+                          liked_movie_ids=liked, top_n=k)
         cf, cf_t = timed(collaborative_filtering.recommend, movies, user_item_matrix, movie_ids, movie_id_to_row,
                           liked_movie_ids=liked, top_n=k, _cf_scores=cf_scores)
         hy, hy_t = timed(hybrid.recommend, movies, genre_matrix, movie_ids, movie_id_to_row, genre_names,
                           user_item_matrix, liked_movie_ids=liked, top_n=k, _cf_scores=cf_scores)
-        recs_by_name = {"collaborative": (cf, cf_t), "hybrid": (hy, hy_t)}
-
-        # content-based: search-driven only, never a liked_movie_ids profile.
-        # Stand-in for "the user searched for a movie" -- their single
-        # highest-rated training movie (the one they'd most plausibly search
-        # for) becomes the query, scored against the same held-out relevant
-        # set as everyone else.
-        seed_movie_id = int(user_train.loc[user_train["rating"].idxmax(), "movieId"])
-        cb, cb_t = timed(content_based.recommend_by_search, movies, cb_matrix, movie_ids, movie_id_to_row,
-                          matched_movie_ids=[seed_movie_id], top_n=k)
-        recs_by_name["content_based"] = (cb, cb_t)
+        recs_by_name = {"content_based": (cb, cb_t), "collaborative": (cf, cf_t), "hybrid": (hy, hy_t)}
 
         if tfidf_matrix is not None:
+            cbt, cbt_t = timed(content_based.recommend_tfidf, movies, tfidf_matrix, movie_ids, movie_id_to_row,
+                               vectorizer, liked_movie_ids=liked, top_n=k)
             hyt, hyt_t = timed(hybrid.recommend_tfidf, movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer,
                                user_item_matrix, liked_movie_ids=liked, top_n=k, _cf_scores=cf_scores)
+            recs_by_name["content_based_tfidf"] = (cbt, cbt_t)
             recs_by_name["hybrid_tfidf"] = (hyt, hyt_t)
 
         for name, (recs, elapsed) in recs_by_name.items():
@@ -173,52 +180,35 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
             if diversity is not None:
                 diversity_scores[name].append(diversity)
 
-        # content-based's own profile-builder logic (kept there for hybrid.py
-        # to import -- see content_based.py's module docstring). Content-based
-        # itself isn't scored in this table; these two profiles exist purely
-        # to feed the hybrid/hybrid_tfidf blend below.
         profile_cb = content_based.build_user_profile(genre_matrix, movie_id_to_row, liked)
         profile_cb_tfidf = None
         if tfidf_matrix is not None:
             profile_cb_tfidf = content_based.build_tfidf_profile(tfidf_matrix, movie_id_to_row, liked, vectorizer)
-        seed_row_idx = movie_id_to_row.get(seed_movie_id)  # for content-based's search-driven rating prediction
 
         if user_id in user_id_to_col:
             col = user_id_to_col[user_id]
             for _, row in user_test.iterrows():
                 target_mid = row["movieId"]
                 actual_rating = row["rating"]
-
+                
                 if target_mid not in movie_id_to_row:
                     continue
                 target_row_idx = movie_id_to_row[target_mid]
-
+                
                 preds = {}
-
+                
                 # CF prediction
                 pred_cf = collaborative_filtering.predict_rating(user_item_matrix, movie_id_to_row, col, target_mid)
                 preds["collaborative"] = pred_cf
-
-                # CB prediction (search-driven): similarity between the seed
-                # movie (this user's synthetic search query) and the held-out
-                # movie -- same query used for the ranking metrics above.
-                pred_cb_search = None
-                if seed_row_idx is not None:
-                    sim = cosine_similarity(
-                        cb_matrix[seed_row_idx:seed_row_idx + 1], cb_matrix[target_row_idx:target_row_idx + 1]
-                    )[0, 0]
-                    pred_cb_search = max(0.0, min(5.0, sim * 5.0))
-                preds["content_based"] = pred_cb_search
-
-                # CB prediction (liked-profile, scale 0-1 similarity to 0-5 rating)
-                # -- intermediate only, not the content_based row above; needed
-                # here purely to feed the hybrid prediction below.
+                
+                # CB prediction (scale 0-1 similarity to 0-5 rating)
                 pred_cb = None
                 if profile_cb is not None:
                     target_vec = genre_matrix[target_row_idx].reshape(1, -1)
                     sim = cosine_similarity(profile_cb, target_vec)[0, 0]
                     pred_cb = max(0.0, min(5.0, sim * 5.0))
-
+                preds["content_based"] = pred_cb
+                
                 # HY prediction
                 alpha = 0.5
                 if pred_cb is not None and pred_cf is not None:
@@ -239,7 +229,8 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
                             profile_cb_tfidf = np.asarray(profile_cb_tfidf)
                         sim = cosine_similarity(profile_cb_tfidf.reshape(1, -1), target_vec)[0, 0]
                         pred_cb_tfidf = max(0.0, min(5.0, sim * 5.0))
-
+                    preds["content_based_tfidf"] = pred_cb_tfidf
+                    
                     if pred_cb_tfidf is not None and pred_cf is not None:
                         preds["hybrid_tfidf"] = alpha * pred_cb_tfidf + (1 - alpha) * pred_cf
                     elif pred_cb_tfidf is not None:
