@@ -1,26 +1,29 @@
-"""Content-based recommender: recommends movies with similar genres.
+"""Content-based recommender: recommends movies similar to a searched title.
 
 OWNER: Member 1
-This module solves cold start naturally -- a brand new user with zero
-ratings can still get recommendations from their selected genre
-preferences, since movies are represented purely by their own genre
-features (no other users' behaviour required).
+Per tutor feedback, this module's own recommendation surface is driven
+entirely by title/synopsis search -- never by the Like button or a
+liked_movie_ids profile, which blurs content-based into looking like
+collaborative filtering's user-profile pattern:
 
-Three implementations live here on purpose:
-- `build_user_profile` / `recommend` -- the original genre one-hot +
-  cosine similarity baseline.
-- `build_tfidf_profile` / `recommend_tfidf` -- richer TF-IDF features
-  (TMDb overview/keywords/cast/director + genres, see data_loader.py's
-  `build_tfidf_matrix`). Keeping both lets the report show a concrete
-  before/after precision comparison between the two feature sets.
 - `recommend_by_search` -- similarity from whatever a title search matched
-  (genre + overview text, see data_loader.py's `build_cb_overview_matrix`),
-  averaged across all matches rather than one picked movie. This is what
-  the Content-Based tab in the app actually uses: no liked_movie_ids
-  profile involved, per spec.
+  (genre + keywords + cast + director + overview text, with bigrams, see
+  data_loader.py's `build_cb_overview_matrix`), averaged across all matches
+  rather than one picked movie. This is what the Content-Based tab in the
+  app actually uses.
 
-Ideas for extending this further:
-- Weight recently liked movies more than earlier ones.
+`build_user_profile` / `build_tfidf_profile` below are liked_movie_ids
+profile-builders kept here only because algorithms/hybrid.py (Member 3's
+file, not touched by this change) imports them for its own Like-driven
+recommend()/recommend_tfidf() -- evaluation.py's offline benchmark depends
+on those staying available with their exact signature. Neither is used by
+this file's own recommend_by_search(), and neither backs a Content-Based
+tab in the app anymore.
+
+Ideas for extending recommend_by_search further:
+- Tune tag_weight/overview_weight in build_cb_overview_matrix per genre
+  (e.g. weight cast/director higher for comedies, plot text higher for
+  thrillers) instead of one fixed split for every movie.
 """
 import numpy as np
 import streamlit as st
@@ -31,7 +34,8 @@ from algorithms.ranking import select_top_n
 
 def build_user_profile(genre_matrix: np.ndarray, movie_id_to_row: dict, liked_movie_ids: list[int] | None,
                         genre_names: list[str] | None = None, selected_genres: list[str] | None = None):
-    """Build a single vector representing what the user likes.
+    """Build a single vector representing what the user likes -- used by
+    hybrid.py's own Like-driven recommend(), not by anything in this file.
 
     Priority: average of liked movies' genre vectors if any exist,
     otherwise fall back to the genres picked during onboarding.
@@ -52,31 +56,28 @@ def build_user_profile(genre_matrix: np.ndarray, movie_id_to_row: dict, liked_mo
     return None
 
 
-@st.cache_data(show_spinner=False)
-def recommend(_movies, _genre_matrix: np.ndarray, _movie_ids: np.ndarray, _movie_id_to_row: dict,
-              _genre_names: list[str], liked_movie_ids: list[int] | None = None,
-              selected_genres: list[str] | None = None, top_n: int = 10,
-              allowed_ids: set | None = None, pool_size: int | None = None, sample_seed: int | None = None):
-    """Return top_n movies most similar to the user's profile.
+def build_tfidf_profile(tfidf_matrix, movie_id_to_row: dict, liked_movie_ids: list[int] | None,
+                         vectorizer=None, selected_genres: list[str] | None = None):
+    """TF-IDF equivalent of build_user_profile, using overview/keywords/cast/director/genres --
+    used by hybrid.py's own Like-driven recommend_tfidf(), not by anything in this file.
 
-    `allowed_ids` restricts candidates to this set (e.g. a year-range
-    filter); `pool_size` + `sample_seed` turn a "Refresh" click into a
-    re-roll instead of the same deterministic list -- see
-    algorithms/ranking.py for details. Neither is used by evaluation.py.
-
-    Returns a DataFrame with columns: movieId, title, genres, score
+    Same priority as the genre one-hot version: average of liked movies'
+    TF-IDF rows if any exist, otherwise embed the onboarding genre picks into
+    the same feature space via the fitted vectorizer (genre words are part of
+    the content soup, so this still works even before TMDb-only fields exist).
     """
-    profile = build_user_profile(_genre_matrix, _movie_id_to_row, liked_movie_ids, _genre_names, selected_genres)
-    if profile is None:
-        return None  # caller should fall back to popularity list
+    if liked_movie_ids:
+        rows = [movie_id_to_row[mid] for mid in liked_movie_ids if mid in movie_id_to_row]
+        if rows:
+            return np.asarray(tfidf_matrix[rows].mean(axis=0))
 
-    scores = cosine_similarity(profile, _genre_matrix)[0]
-    exclude = set(liked_movie_ids or [])
-    results = select_top_n(scores, _movie_ids, exclude, allowed_ids, top_n, pool_size, sample_seed)
+    if selected_genres and vectorizer is not None:
+        query = " ".join(selected_genres)
+        vec = vectorizer.transform([query])
+        if vec.nnz > 0:
+            return vec.toarray()
 
-    out = _movies[_movies["movieId"].isin(results)][["movieId", "title", "genres"]].copy()
-    out["score"] = out["movieId"].map(lambda mid: scores[_movie_id_to_row[mid]])
-    return out.sort_values("score", ascending=False).reset_index(drop=True)
+    return None
 
 
 @st.cache_data(show_spinner=False)
@@ -105,51 +106,6 @@ def recommend_by_search(_movies, _matrix, _movie_ids: np.ndarray, _movie_id_to_r
     results = select_top_n(scores, _movie_ids, exclude, allowed_ids, top_n, pool_size, sample_seed)
     if not results:
         return None
-
-    out = _movies[_movies["movieId"].isin(results)][["movieId", "title", "genres"]].copy()
-    out["score"] = out["movieId"].map(lambda mid: scores[_movie_id_to_row[mid]])
-    return out.sort_values("score", ascending=False).reset_index(drop=True)
-
-
-def build_tfidf_profile(tfidf_matrix, movie_id_to_row: dict, liked_movie_ids: list[int] | None,
-                         vectorizer=None, selected_genres: list[str] | None = None):
-    """TF-IDF equivalent of build_user_profile, using overview/keywords/cast/director/genres.
-
-    Same priority as the genre one-hot version: average of liked movies'
-    TF-IDF rows if any exist, otherwise embed the onboarding genre picks into
-    the same feature space via the fitted vectorizer (genre words are part of
-    the content soup, so this still works even before TMDb-only fields exist).
-    """
-    if liked_movie_ids:
-        rows = [movie_id_to_row[mid] for mid in liked_movie_ids if mid in movie_id_to_row]
-        if rows:
-            return np.asarray(tfidf_matrix[rows].mean(axis=0))
-
-    if selected_genres and vectorizer is not None:
-        query = " ".join(selected_genres)
-        vec = vectorizer.transform([query])
-        if vec.nnz > 0:
-            return vec.toarray()
-
-    return None
-
-
-@st.cache_data(show_spinner=False)
-def recommend_tfidf(_movies, _tfidf_matrix, _movie_ids: np.ndarray, _movie_id_to_row: dict,
-                     _vectorizer=None, liked_movie_ids: list[int] | None = None,
-                     selected_genres: list[str] | None = None, top_n: int = 10,
-                     allowed_ids: set | None = None, pool_size: int | None = None, sample_seed: int | None = None):
-    """Same ranking logic as recommend(), scored against the richer TF-IDF content matrix.
-
-    See recommend() above for what `allowed_ids`/`pool_size`/`sample_seed` do.
-    """
-    profile = build_tfidf_profile(_tfidf_matrix, _movie_id_to_row, liked_movie_ids, _vectorizer, selected_genres)
-    if profile is None:
-        return None
-
-    scores = cosine_similarity(profile, _tfidf_matrix)[0]
-    exclude = set(liked_movie_ids or [])
-    results = select_top_n(scores, _movie_ids, exclude, allowed_ids, top_n, pool_size, sample_seed)
 
     out = _movies[_movies["movieId"].isin(results)][["movieId", "title", "genres"]].copy()
     out["score"] = out["movieId"].map(lambda mid: scores[_movie_id_to_row[mid]])
