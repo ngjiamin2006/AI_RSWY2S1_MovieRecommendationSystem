@@ -51,8 +51,8 @@ def recommend(_movies, _user_item_matrix: csr_matrix, _movie_ids: np.ndarray, _m
         return None
 
     out = _movies[_movies["movieId"].isin(results)][["movieId", "title", "genres"]].copy()
-    out["score"] = out["movieId"].map(lambda mid: scores[_movie_id_to_row[mid]])
-    return out.sort_values("score", ascending=False).reset_index(drop=True)
+    out["rating"] = out["movieId"].map(lambda mid: scores[_movie_id_to_row[mid]])
+    return out.sort_values("rating", ascending=False).reset_index(drop=True)
 
 
 def predict_rating(user_item_matrix: csr_matrix, movie_id_to_row: dict, user_col: int,
@@ -78,6 +78,37 @@ def predict_rating(user_item_matrix: csr_matrix, movie_id_to_row: dict, user_col
     if top_sims.sum() <= 0:
         return None
     return float(np.dot(top_sims, top_ratings) / top_sims.sum())
+
+
+def _apply_mmr(cf_scores, _movie_ids, _user_item_matrix, candidate_indices, top_n=10, lambda_param=0.3, pool_size=50):
+    if not candidate_indices:
+        return []
+    candidate_indices = candidate_indices[:pool_size]
+    if len(candidate_indices) <= 1:
+        return [_movie_ids[idx] for idx in candidate_indices][:top_n]
+    candidate_vectors = _user_item_matrix[candidate_indices]
+    item_sim_matrix = cosine_similarity(candidate_vectors)
+    selected_indices = []
+    selected_mids = []
+    while len(selected_mids) < top_n and len(selected_mids) < len(candidate_indices):
+        best_mmr = -float('inf')
+        best_cand_idx = -1
+        best_real_idx = -1
+        for i, real_idx in enumerate(candidate_indices):
+            if i in selected_indices:
+                continue
+            relevance = cf_scores[real_idx]
+            penalty = np.max(item_sim_matrix[i, selected_indices]) if selected_indices else 0.0
+            mmr_score = (1 - lambda_param) * relevance - lambda_param * penalty
+            if mmr_score > best_mmr:
+                best_mmr = mmr_score
+                best_cand_idx = i
+                best_real_idx = real_idx
+        if best_cand_idx == -1:
+            break
+        selected_indices.append(best_cand_idx)
+        selected_mids.append(_movie_ids[best_real_idx])
+    return selected_mids
 
 
 @st.cache_data(show_spinner=False)
@@ -113,28 +144,37 @@ def recommend_user_based(_movies, _user_item_matrix: csr_matrix, _movie_ids: np.
             best_match_user = other_user
             best_match_likes = their_likes
 
-    if not best_match_user or best_match_score == 0:
-        return None, "We couldn't find any other local users with similar tastes yet. Try switching to another user and liking the same movies!"
-
-    # Recommend what the best match liked, but I haven't seen
-    user_based_recs = [mid for mid in best_match_likes if mid not in my_set]
-
-    # We also get the standard item-based recommendations to pad the list
-    # so the user always sees 10 movies, making the UI look consistent.
     liked_rows = [_movie_id_to_row[mid] for mid in my_likes if mid in _movie_id_to_row]
     cf_scores = np.zeros(len(_movie_ids))
     if liked_rows:
         liked_vectors = _user_item_matrix[liked_rows]
         cf_scores = cosine_similarity(liked_vectors, _user_item_matrix).mean(axis=0)
-        
+
+    # Determine candidates for item-based fallback (must be unseen and have CF score > 0)
     order = np.argsort(-cf_scores)
-    item_based_recs = []
-    for idx in order:
-        mid = _movie_ids[idx]
-        if mid not in my_set and mid not in user_based_recs and cf_scores[idx] > 0:
-            item_based_recs.append(mid)
-            if len(item_based_recs) >= top_n:
-                break
+    allowed_candidates = [idx for idx in order if _movie_ids[idx] not in my_set and cf_scores[idx] > 0]
+    
+    max_cf = np.max(cf_scores) if np.max(cf_scores) > 0 else 1.0
+
+    if not best_match_user or best_match_score == 0:
+        # No local user match: use MMR on item-based candidates for diverse results
+        item_based_recs = _apply_mmr(cf_scores, _movie_ids, _user_item_matrix, allowed_candidates, top_n=top_n)
+        
+        if not item_based_recs:
+            return None, "No recommendations available right now."
+            
+        out = _movies[_movies["movieId"].isin(item_based_recs)][["movieId", "title", "genres"]].copy()
+        out["rating"] = out["movieId"].map(lambda mid: 3.5 + 1.5 * (cf_scores[_movie_id_to_row[mid]] / max_cf))
+        out = out.sort_values("rating", ascending=False).head(top_n).reset_index(drop=True)
+        return out, "💡 **Other movies you might like**"
+
+    # User match found: Recommend what the best match liked (that I haven't seen)
+    user_based_recs = [mid for mid in best_match_likes if mid not in my_set]
+
+    # Pad with diverse item-based recommendations using MMR
+    remaining_n = top_n - len(user_based_recs)
+    padding_candidates = [idx for idx in allowed_candidates if _movie_ids[idx] not in user_based_recs]
+    item_based_recs = _apply_mmr(cf_scores, _movie_ids, _user_item_matrix, padding_candidates, top_n=remaining_n) if remaining_n > 0 else []
 
     final_recs = user_based_recs + item_based_recs
     final_recs = final_recs[:top_n]
@@ -145,15 +185,14 @@ def recommend_user_based(_movies, _user_item_matrix: csr_matrix, _movie_ids: np.
     # Build the dataframe for recommendations
     out = _movies[_movies["movieId"].isin(final_recs)][["movieId", "title", "genres"]].copy()
     
-    # Map scores: give a high dummy score (e.g. 1.0) to the user-based ones to keep them at the top,
-    # and the actual cf_scores to the rest
-    def get_score(mid):
+    # Scale Expected Ratings (User match = ~4.5 to 5.0, Item fallback = 3.5 to 4.5)
+    def get_rating(mid):
         if mid in user_based_recs:
-            return 1.0 + best_match_score  # Ensure they stay at the very top
-        return cf_scores[_movie_id_to_row[mid]]
+            return 4.5 + (0.5 * best_match_score)  # e.g., 80% match -> 4.9 stars
+        return 3.5 + 1.0 * (cf_scores[_movie_id_to_row[mid]] / max_cf)
         
-    out["score"] = out["movieId"].map(get_score)
-    out = out.sort_values("score", ascending=False).head(top_n).reset_index(drop=True)
+    out["rating"] = out["movieId"].map(get_rating)
+    out = out.sort_values("rating", ascending=False).head(top_n).reset_index(drop=True)
     
-    explanation = f"💡 **Collaborative Effect:** We noticed your taste matches **{best_match_user}** (Similarity: {best_match_score*100:.0f}%). We've put their favorites at the top of your list!"
+    explanation = "💡 **Other movies you might like**"
     return out, explanation
