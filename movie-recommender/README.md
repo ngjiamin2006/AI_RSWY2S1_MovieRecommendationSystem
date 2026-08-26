@@ -38,11 +38,11 @@ streamlit run app.py
 ## How the app is organized
 
 - `data_loader.py` — loads MovieLens `ml-25m` + TMDb metadata, builds the genre matrix, TF-IDF matrix, and sparse user-item ratings matrix. Shared by everyone, no Streamlit code here.
-- `algorithms/content_based.py` — **Member 1**: genre one-hot baseline, plus a richer TF-IDF variant over TMDb overview/keywords/cast/director. Handles cold start via picked genres.
+- `algorithms/content_based.py` — **Member 1**: search-driven only, per tutor feedback (never the Like button) — type a title/keyword, and it ranks every other movie by genre + synopsis (TMDb overview) similarity to whatever the search matched.
 - `algorithms/collaborative_filtering.py` — **Member 2**: item-based CF using rating similarity between movies, plus a local-user Jaccard-similarity variant (simulated multi-user demo). Item-based CF has no cold-start ability by design — falls back to a popularity list until the user has liked at least one movie (this is expected and worth mentioning in your report as a real limitation of CF).
-- `algorithms/hybrid.py` — **Member 3**: weighted combination of the two above, in both genre-only and TF-IDF flavors.
+- `algorithms/hybrid.py` — **Member 3**: weighted combination of collaborative filtering + content similarity, in both a Like-driven genre/TF-IDF flavor (used by the Evaluation tab) and its own search-driven flavor (used by the Hybrid tab in the UI).
 - `algorithms/ranking.py` — shared top-N selection logic (year-range filtering, "Refresh" re-sampling) used by all three algorithm files.
-- `evaluation.py` — train/test split + precision/recall/F1@K (all three algorithms) + RMSE/MAE (collaborative filtering) + coverage/diversity/timing. Run directly (`python evaluation.py`) to get a metrics table for your documentation, independent of the UI.
+- `evaluation.py` — train/test split + precision/recall/F1@K (all three algorithms) + RMSE/MAE + coverage/diversity/timing. Content-based is search-driven, not liked_movie_ids-driven, so it can't be fed a profile like the other two — each test user's single highest-rated training movie stands in as their search query instead. Run directly (`python evaluation.py`) to get a metrics table for your documentation, independent of the UI.
 - `app.py` — the Streamlit UI: pick genres and/or like movies, then browse the Home, Popular, Top Rated, New Releases, Content-Based, Collaborative Filtering, and Hybrid tabs (posters, year filter, refresh, local-user switcher) and check the Evaluation tab for metrics.
 
 ## Suggested workflow per member
