@@ -4,7 +4,29 @@ This is what produces the metrics table required by the assignment
 rubric (precision/recall/F1, RMSE) -- it is separate from the live
 "Like" button demo in app.py. Run this file directly to print a
 comparison table, or import `evaluate_all` from app.py's evaluation tab.
+
+=== Evaluation Metrics Explained ===
+1. Precision@K (准确率): 
+   - Out of the Top-K movies recommended to the user, what percentage did the user ACTUALLY like? (Measures how accurate the recommendations are).
+2. Recall@K (召回率): 
+   - Out of ALL the hidden movies the user liked in the test set, what percentage did we successfully catch in our Top-K list? (Measures how many good movies we didn't miss).
+3. F1@K (F1分数): 
+   - The harmonic mean of Precision and Recall. A balanced single score to judge overall recommendation quality.
+4. Coverage (覆盖率): 
+   - What percentage of the entire movie database did the algorithm recommend across ALL users? (High coverage = it recommends a wide variety of movies, not just the top 10 blockbusters).
+5. Diversity (多样性): 
+   - How different are the movies within a single user's Top-K list? (Calculated via genre dissimilarity; prevents recommending 10 identical superhero movies).
+6. Avg Time (平均耗时): 
+   - How many seconds it takes to generate recommendations for one user.
+7. RMSE / MSE / MAE (误差指标): 
+   - Root Mean Squared Error / Mean Squared Error / Mean Absolute Error. 
+   - Measures how far off our predicted 0-5 star rating was from the user's actual rating. (Lower is better).
+8. Accuracy (±1 Star): 
+   - What percentage of our rating predictions were within 1 star of the actual rating.
+====================================
 """
+
+
 import time
 
 import numpy as np

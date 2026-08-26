@@ -8,13 +8,7 @@ from algorithms.ranking import select_top_n
 
 def compute_cf_scores(user_item_matrix: csr_matrix, movie_id_to_row: dict,
                        liked_movie_ids: list[int] | None) -> np.ndarray:
-    """Mean cosine similarity of every movie to the user's liked movies (via shared raters).
 
-    This is the expensive (n_liked x n_users) x (n_movies x n_users) similarity
-    call. Pulled out so evaluation.py can compute it once per user and hand the
-    result to recommend() and hybrid.py's blended recommenders via `_cf_scores`,
-    instead of each one recomputing it independently.
-    """
     n_movies = user_item_matrix.shape[0]
     liked_rows = [movie_id_to_row[mid] for mid in (liked_movie_ids or []) if mid in movie_id_to_row]
     if not liked_rows:
