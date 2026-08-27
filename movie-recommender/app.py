@@ -7,7 +7,7 @@ import pandas as pd
 from data_loader import (
     load_data, build_genre_matrix, build_user_item_matrix, get_popular_movies,
     get_most_rated_movies, get_new_releases, load_links, attach_tmdb_metadata,
-    build_tfidf_matrix, build_cb_overview_matrix, build_year_lookup, tmdb_available,
+    build_tfidf_matrix, build_year_lookup, tmdb_available,
 )
 from algorithms import content_based, collaborative_filtering, hybrid
 import evaluation
@@ -162,8 +162,6 @@ def load_pipeline(dataset: str):
     else:
         tmdb_error = "TMDb dataset not found at movie-recommender/data/tmdb/ -- posters and rich content features are unavailable. See README for the download step."
 
-    _, cb_matrix, _ = build_cb_overview_matrix(enriched)
-
     poster_lookup = (
         dict(zip(enriched["movieId"], enriched.get("poster_url", []))) if "poster_url" in enriched.columns else {}
     )
@@ -175,7 +173,6 @@ def load_pipeline(dataset: str):
         "movie_ids": movie_ids, "genre_matrix": genre_matrix, "genre_names": genre_names,
         "user_item_matrix": user_item_matrix, "movie_id_to_row": movie_id_to_row,
         "user_id_to_col": user_id_to_col, "tfidf_matrix": tfidf_matrix, "vectorizer": vectorizer,
-        "cb_matrix": cb_matrix,
         "poster_lookup": poster_lookup, "tmdb_error": tmdb_error, "year_lookup": year_lookup,
         "movie_avg_ratings": movie_avg_ratings,
     }
@@ -196,7 +193,6 @@ movie_ids, genre_matrix, genre_names = pipeline["movie_ids"], pipeline["genre_ma
 user_item_matrix = pipeline["user_item_matrix"]
 movie_id_to_row, user_id_to_col = pipeline["movie_id_to_row"], pipeline["user_id_to_col"]
 tfidf_matrix, vectorizer = pipeline["tfidf_matrix"], pipeline["vectorizer"]
-cb_matrix = pipeline["cb_matrix"]
 poster_lookup = pipeline["poster_lookup"]
 year_lookup = pipeline["year_lookup"]
 movie_avg_ratings = pipeline["movie_avg_ratings"]
@@ -262,8 +258,6 @@ if "liked_movie_ids" not in st.session_state:
     st.session_state.liked_movie_ids = st.session_state.local_profiles[st.session_state.current_user]
 if "selected_genres" not in st.session_state:
     st.session_state.selected_genres = []
-if "cb_matched_ids" not in st.session_state:
-    st.session_state.cb_matched_ids = []
 
 title_col, stats_col = st.columns([5, 4])
 with title_col:
@@ -526,9 +520,11 @@ def clear_cb_search():
 def render_hybrid_cards(display_df, key_prefix="hy"):
     """Frontend rendering for the search-driven hybrid results.
 
-    Deliberately minimal compared to render_recommendations() -- poster +
-    title only. No score, no genre: those live in meta["analysis"] for the
-    report/backend, not the recommendation cards (per spec).
+    Poster + title, plus a Like toggle that feeds the shared
+    st.session_state.liked_movie_ids -- liking movies here sharpens the
+    personalized user-based CF signal (_personalized_user_based_cf_score
+    in hybrid.py) on the *next* search. No score, no genre shown here:
+    those live in meta["analysis"] for the report/backend (per spec).
     """
     if display_df is None or display_df.empty:
         return
@@ -559,6 +555,15 @@ def render_hybrid_cards(display_df, key_prefix="hy"):
                     f'<strong style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-overflow: ellipsis; font-size: 1rem; line-height: 1.2;">'
                     f'{title}</strong></div>', unsafe_allow_html=True,
                 )
+                is_liked = row["movieId"] in st.session_state.liked_movie_ids
+                st.button(
+                    "❤️ Liked" if is_liked else "🤍 Like",
+                    key=f"{key_prefix}_like_{row['movieId']}",
+                    disabled=is_liked,
+                    on_click=add_like,
+                    args=(row["movieId"],),
+                    use_container_width=True,
+                )
 
 
 def render_searched_movie_card(movie_id, title, genres):
@@ -576,13 +581,14 @@ def render_searched_movie_card(movie_id, title, genres):
     poster = poster_lookup.get(movie_id)
     genre_list = [g for g in str(genres).split("|") if g and g != "(no genres listed)"]
     genre_str = ", ".join(genre_list) if genre_list else "No genre listed"
+    is_liked = movie_id in st.session_state.liked_movie_ids
     col = st.columns([1, 3, 1])[1]  # center a narrower column
     with col:
         if isinstance(poster, str) and poster.strip() != "":
             st.markdown(
                 f'<div style="display:flex; gap:16px; align-items:center; padding:12px; '
                 f'background: rgba(99, 102, 241, 0.08); border: 1px solid rgba(99, 102, 241, 0.3); '
-                f'border-radius:12px; margin-bottom: 16px;">'
+                f'border-radius:12px; margin-bottom: 8px;">'
                 f'<img src="{poster}" style="width:70px; height:100px; object-fit:cover; border-radius:8px; flex-shrink:0;">'
                 f'<div><div style="font-size:0.8rem; color:#a0a0a0;">You searched for</div>'
                 f'<strong style="font-size:1.1rem;">{title}</strong>'
@@ -592,7 +598,7 @@ def render_searched_movie_card(movie_id, title, genres):
         else:
             st.markdown(
                 f'<div style="padding:12px; background: rgba(99, 102, 241, 0.08); '
-                f'border: 1px solid rgba(99, 102, 241, 0.3); border-radius:12px; margin-bottom: 16px;">'
+                f'border: 1px solid rgba(99, 102, 241, 0.3); border-radius:12px; margin-bottom: 8px;">'
                 f'<div style="font-size:0.8rem; color:#a0a0a0;">You searched for</div>'
                 f'<strong style="font-size:1.1rem;">{title}</strong>'
                 f'<div style="font-size:0.85rem; color:#a0a0a0; margin-top:4px;">{genre_str}</div></div>',
