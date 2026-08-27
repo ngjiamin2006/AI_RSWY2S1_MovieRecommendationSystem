@@ -2,6 +2,8 @@
 
 Run with: streamlit run app.py
 """
+import html
+
 import streamlit as st  # type: ignore[missing-import]
 import pandas as pd
 from data_loader import (
@@ -167,6 +169,9 @@ def load_pipeline(dataset: str):
     poster_lookup = (
         dict(zip(enriched["movieId"], enriched.get("poster_url", []))) if "poster_url" in enriched.columns else {}
     )
+    overview_lookup = (
+        dict(zip(enriched["movieId"], enriched.get("overview", []))) if "overview" in enriched.columns else {}
+    )
     year_lookup = build_year_lookup(enriched)
     movie_avg_ratings = ratings.groupby("movieId")["rating"].mean().to_dict()
 
@@ -176,7 +181,8 @@ def load_pipeline(dataset: str):
         "user_item_matrix": user_item_matrix, "movie_id_to_row": movie_id_to_row,
         "user_id_to_col": user_id_to_col, "tfidf_matrix": tfidf_matrix, "vectorizer": vectorizer,
         "cb_matrix": cb_matrix,
-        "poster_lookup": poster_lookup, "tmdb_error": tmdb_error, "year_lookup": year_lookup,
+        "poster_lookup": poster_lookup, "overview_lookup": overview_lookup,
+        "tmdb_error": tmdb_error, "year_lookup": year_lookup,
         "movie_avg_ratings": movie_avg_ratings,
     }
 
@@ -198,6 +204,7 @@ movie_id_to_row, user_id_to_col = pipeline["movie_id_to_row"], pipeline["user_id
 tfidf_matrix, vectorizer = pipeline["tfidf_matrix"], pipeline["vectorizer"]
 cb_matrix = pipeline["cb_matrix"]
 poster_lookup = pipeline["poster_lookup"]
+overview_lookup = pipeline["overview_lookup"]
 year_lookup = pipeline["year_lookup"]
 movie_avg_ratings = pipeline["movie_avg_ratings"]
 
@@ -353,13 +360,24 @@ def render_recommendations(df, key_prefix, show_score=True, score_label="score")
                 genre_str = ""
                 if genres and genres[0] != 'nan':
                     genre_str = f"{', '.join(genres[:2])}"
-                
+
+                # Plain-language synopsis so it's obvious *why* a movie was
+                # recommended even when the search word isn't in its title
+                # (e.g. searching "cat" can surface a movie whose synopsis
+                # mentions a cat, not its title) -- escaped since this is
+                # external TMDb text being injected into raw HTML.
+                overview = overview_lookup.get(row["movieId"])
+                overview_str = html.escape(overview.strip()) if isinstance(overview, str) and overview.strip() else ""
+
                 # Use a fixed-height container to ensure all cards are identical in height
-                # margin-top: auto pushes the info block to the bottom, aligning it with the button
+                # margin-top: auto pushes the score/genre block to the bottom, aligning it with the button
                 st.markdown(
-                    f'<div style="height: 100px; display: flex; flex-direction: column; margin-bottom: 10px;">'
+                    f'<div style="height: 240px; display: flex; flex-direction: column; margin-bottom: 10px;">'
                     f'<strong style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-overflow: ellipsis; font-size: 1rem; line-height: 1.2;">'
                     f'{title}</strong>'
+                    f'<div style="display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; '
+                    f'color: #a0a0a0; font-size: 0.8rem; line-height: 1.3; margin-top: 6px;">'
+                    f'{overview_str}</div>'
                     f'<div style="margin-top: auto;">'
                     f'<div style="color: #a0a0a0; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">'
                     f'{score_str}</div>'
@@ -552,6 +570,9 @@ def render_hybrid_cards(display_df, key_prefix="hy"):
     personalized user-based CF signal (_personalized_user_based_cf_score
     in hybrid.py) on the *next* search. No score, no genre shown here:
     those live in meta["analysis"] for the report/backend (per spec).
+    Synopsis is shown though, kept consistent with every other algorithm's
+    cards (render_recommendations) so the "why was this recommended" cue
+    is available everywhere, not just Content-Based/Home/CF.
     """
     if display_df is None or display_df.empty:
         return
@@ -577,10 +598,17 @@ def render_hybrid_cards(display_df, key_prefix="hy"):
                         f'<span style="color: #94a3b8; font-size: 1.2rem; font-weight: 600; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden;">'
                         f'{title}</span></div>', unsafe_allow_html=True,
                     )
+                overview = overview_lookup.get(row["movieId"])
+                overview_str = html.escape(overview.strip()) if isinstance(overview, str) and overview.strip() else ""
+
                 st.markdown(
-                    f'<div style="height: 40px; display: flex; align-items: flex-start; margin-bottom: 10px;">'
+                    f'<div style="height: 200px; display: flex; flex-direction: column; margin-bottom: 10px;">'
                     f'<strong style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-overflow: ellipsis; font-size: 1rem; line-height: 1.2;">'
-                    f'{title}</strong></div>', unsafe_allow_html=True,
+                    f'{title}</strong>'
+                    f'<div style="display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; '
+                    f'color: #a0a0a0; font-size: 0.8rem; line-height: 1.3; margin-top: 6px;">'
+                    f'{overview_str}</div>'
+                    f'</div>', unsafe_allow_html=True,
                 )
                 is_liked = row["movieId"] in st.session_state.liked_movie_ids
                 st.button(
