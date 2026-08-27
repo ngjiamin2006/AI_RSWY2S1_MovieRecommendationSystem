@@ -7,7 +7,7 @@ import pandas as pd
 from data_loader import (
     load_data, build_genre_matrix, build_user_item_matrix, get_popular_movies,
     get_most_rated_movies, get_new_releases, load_links, attach_tmdb_metadata,
-    build_tfidf_matrix, build_year_lookup, tmdb_available,
+    build_tfidf_matrix, build_cb_overview_matrix, build_year_lookup, tmdb_available,
 )
 from algorithms import content_based, collaborative_filtering, hybrid
 import evaluation
@@ -162,6 +162,8 @@ def load_pipeline(dataset: str):
     else:
         tmdb_error = "TMDb dataset not found at movie-recommender/data/tmdb/ -- posters and rich content features are unavailable. See README for the download step."
 
+    _, cb_matrix, _ = build_cb_overview_matrix(enriched)
+
     poster_lookup = (
         dict(zip(enriched["movieId"], enriched.get("poster_url", []))) if "poster_url" in enriched.columns else {}
     )
@@ -173,6 +175,7 @@ def load_pipeline(dataset: str):
         "movie_ids": movie_ids, "genre_matrix": genre_matrix, "genre_names": genre_names,
         "user_item_matrix": user_item_matrix, "movie_id_to_row": movie_id_to_row,
         "user_id_to_col": user_id_to_col, "tfidf_matrix": tfidf_matrix, "vectorizer": vectorizer,
+        "cb_matrix": cb_matrix,
         "poster_lookup": poster_lookup, "tmdb_error": tmdb_error, "year_lookup": year_lookup,
         "movie_avg_ratings": movie_avg_ratings,
     }
@@ -193,6 +196,7 @@ movie_ids, genre_matrix, genre_names = pipeline["movie_ids"], pipeline["genre_ma
 user_item_matrix = pipeline["user_item_matrix"]
 movie_id_to_row, user_id_to_col = pipeline["movie_id_to_row"], pipeline["user_id_to_col"]
 tfidf_matrix, vectorizer = pipeline["tfidf_matrix"], pipeline["vectorizer"]
+cb_matrix = pipeline["cb_matrix"]
 poster_lookup = pipeline["poster_lookup"]
 year_lookup = pipeline["year_lookup"]
 movie_avg_ratings = pipeline["movie_avg_ratings"]
@@ -258,6 +262,12 @@ if "liked_movie_ids" not in st.session_state:
     st.session_state.liked_movie_ids = st.session_state.local_profiles[st.session_state.current_user]
 if "selected_genres" not in st.session_state:
     st.session_state.selected_genres = []
+if "cb_search_history" not in st.session_state:
+    st.session_state.cb_search_history = []  # movieIds from every distinct search this session
+if "cb_query_history" not in st.session_state:
+    st.session_state.cb_query_history = []  # the query strings themselves, for the "Because you searched..." label
+if "cb_last_query" not in st.session_state:
+    st.session_state.cb_last_query = ""
 
 title_col, stats_col = st.columns([5, 4])
 with title_col:
@@ -426,6 +436,11 @@ def search_movies_cb(text_key="cb_search_input", render_prefix="cb_search"):
     All matches together become the profile for content_based.recommend_by_search(),
     stored as cb_matched_ids -- unlike search_and_like(), nothing is
     appended to liked_movie_ids.
+
+    Every *distinct* query this session also gets folded into
+    cb_search_history/cb_query_history -- still search-driven (never the
+    Like button), just a broader query than the current single search, used
+    by the "Because you searched..." section in the app.
     """
     with st.form(key=f"{text_key}_form"):
         col1, col2 = st.columns([5, 1])
@@ -449,6 +464,13 @@ def search_movies_cb(text_key="cb_search_input", render_prefix="cb_search"):
             matches["score"] = matches["movieId"].map(movie_avg_ratings)
             render_recommendations(matches, render_prefix, score_label="Average Rating")
             st.session_state.cb_matched_ids = matches['movieId'].tolist()
+
+            if query != st.session_state.cb_last_query:
+                st.session_state.cb_last_query = query
+                st.session_state.cb_query_history.append(query)
+                for mid in st.session_state.cb_matched_ids:
+                    if mid not in st.session_state.cb_search_history:
+                        st.session_state.cb_search_history.append(mid)
     else:
         st.session_state.cb_matched_ids = []
 
@@ -478,7 +500,13 @@ with st.sidebar:
         st.rerun()
 
 def _best_match_recs(algorithm_name, pool_kwargs):
-    """Run whichever algorithm the Evaluation tab measured as having the highest F1@K."""
+    """Run whichever algorithm the Evaluation tab measured as having the highest F1@K.
+
+    content_based is search-driven only (per tutor feedback, never
+    Like-button-driven), so unlike the other three it can't take
+    liked_movie_ids as its query -- mirrors evaluation.py's own stand-in:
+    the most recently liked movie becomes the search query.
+    """
     common = dict(
         liked_movie_ids=st.session_state.liked_movie_ids,
         top_n=30,
@@ -486,14 +514,12 @@ def _best_match_recs(algorithm_name, pool_kwargs):
         **pool_kwargs,
     )
     if algorithm_name == "content_based":
-        return content_based.recommend(
-            movies, genre_matrix, movie_ids, movie_id_to_row, genre_names,
-            selected_genres=st.session_state.selected_genres, **common,
-        )
-    if algorithm_name == "content_based_tfidf" and tfidf_matrix is not None:
-        return content_based.recommend_tfidf(
-            movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer,
-            selected_genres=st.session_state.selected_genres, **common,
+        if not st.session_state.liked_movie_ids:
+            return None
+        seed_movie_id = st.session_state.liked_movie_ids[-1]
+        return content_based.recommend_by_search(
+            movies, cb_matrix, movie_ids, movie_id_to_row,
+            matched_movie_ids=[seed_movie_id], top_n=30, allowed_ids=allowed_ids, **pool_kwargs,
         )
     if algorithm_name == "collaborative":
         return collaborative_filtering.recommend(
@@ -513,9 +539,10 @@ def _best_match_recs(algorithm_name, pool_kwargs):
 
 
 
-def clear_cb_search():
-    st.session_state.cb_search_input = ""
-    st.session_state.cb_matched_ids = []
+def clear_cb_search_history():
+    st.session_state.cb_search_history = []
+    st.session_state.cb_query_history = []
+    st.session_state.cb_last_query = ""
 
 def render_hybrid_cards(display_df, key_prefix="hy"):
     """Frontend rendering for the search-driven hybrid results.
@@ -657,8 +684,7 @@ with tab_ml:
             
             algo_display_names = {
                 "collaborative": "Collaborative Filtering",
-                "content_based": "Content-Based (Genre)",
-                "content_based_tfidf": "Content-Based (TF-IDF)",
+                "content_based": "Content-Based",
                 "hybrid": "Hybrid",
                 "hybrid_tfidf": "Hybrid (TF-IDF)"
             }
@@ -683,29 +709,32 @@ with tab_ml:
         st.caption(
             "Search movies by keyword -- every match found is used together (never just one "
             "guessed match) to find similar movies by genre + overview. This tab does not use "
-            "the Like button as input."
+            "the Like button as input -- every distinct search you make this session builds one "
+            "running \"Because you searched...\" profile, the same way Netflix keeps surfacing "
+            "things related to what you've searched for."
         )
         if tfidf_matrix is None:
             st.info("TMDb overview data isn't available -- similarity is genre-only for this tab. See the sidebar warning above.")
 
         search_movies_cb()
 
-        matched_ids = st.session_state.cb_matched_ids
-        if matched_ids:
+        query_history = st.session_state.cb_query_history
+        if query_history:
             st.divider()
             cc1, cc2, cc3 = st.columns([4, 1, 1])
             with cc1:
-                st.write("### You might like these...")
+                st.write(f"### Because you searched {', '.join(query_history)}...")
             with cc2:
-                pool_kwargs = refresh_controls("cb")
+                pool_kwargs = refresh_controls("cb_hist")
             with cc3:
-                st.button("Clear Search", key="cb_clear_query", on_click=clear_cb_search, use_container_width=True)
+                st.button("Reset History", key="cb_clear_history", on_click=clear_cb_search_history, use_container_width=True)
 
-            recs = content_based.recommend_by_search(
+            history_recs = content_based.recommend_by_search(
                 movies, cb_matrix, movie_ids, movie_id_to_row,
-                matched_movie_ids=matched_ids, top_n=30, allowed_ids=allowed_ids, **pool_kwargs,
+                matched_movie_ids=st.session_state.cb_search_history, top_n=30,
+                allowed_ids=allowed_ids, **pool_kwargs,
             )
-            render_recommendations(recs, "cb")
+            render_recommendations(history_recs, "cb_hist")
 
     elif model_option == "Collaborative Filtering":
         st.caption("Uses User-Based Collaborative Filtering to find users with similar tastes and recommends their highly-rated movies.")
@@ -804,8 +833,7 @@ with tab_eval:
         
         algo_names = {
             "collaborative": "Collaborative Filtering",
-            "content_based": "Content-Based (Genre)",
-            "content_based_tfidf": "Content-Based (TF-IDF)",
+            "content_based": "Content-Based",
             "hybrid": "Hybrid",
             "hybrid_tfidf": "Hybrid (TF-IDF)"
         }
