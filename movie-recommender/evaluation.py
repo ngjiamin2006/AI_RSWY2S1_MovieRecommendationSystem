@@ -117,7 +117,7 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
     movie_ids, genre_matrix, genre_names = build_genre_matrix(movies)
     user_item_matrix, movie_id_to_row, user_id_to_col = build_user_item_matrix(train_ratings, movie_ids)
 
-    algorithm_names = ["collaborative", "content_based", "hybrid"]
+    algorithm_names = ["collaborative", "content_based"]
     tfidf_matrix = vectorizer = None
     # content-based's own genre+overview search matrix -- built unconditionally
     # (degrades to genre-only without TMDb, same as the live Content-Based tab).
@@ -163,9 +163,7 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
 
         cf, cf_t = timed(collaborative_filtering.recommend, movies, user_item_matrix, movie_ids, movie_id_to_row,
                           liked_movie_ids=liked, top_n=k, _cf_scores=cf_scores)
-        hy, hy_t = timed(hybrid.recommend, movies, genre_matrix, movie_ids, movie_id_to_row, genre_names,
-                          user_item_matrix, liked_movie_ids=liked, top_n=k, _cf_scores=cf_scores)
-        recs_by_name = {"collaborative": (cf, cf_t), "hybrid": (hy, hy_t)}
+        recs_by_name = {"collaborative": (cf, cf_t)}
 
         # content-based: search-driven only, never a liked_movie_ids profile.
         # Stand-in for "the user searched for a movie" -- their single
@@ -239,16 +237,8 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
                     sim = cosine_similarity(profile_cb, target_vec)[0, 0]
                     pred_cb = max(0.0, min(5.0, sim * 5.0))
 
-                # HY prediction
-                alpha = 0.5
-                if pred_cb is not None and pred_cf is not None:
-                    preds["hybrid"] = alpha * pred_cb + (1 - alpha) * pred_cf
-                elif pred_cb is not None:
-                    preds["hybrid"] = pred_cb
-                elif pred_cf is not None:
-                    preds["hybrid"] = pred_cf
-                else:
-                    preds["hybrid"] = None
+                # Basic hybrid prediction removed to only evaluate hybrid_tfidf
+                alpha = 0.15
                 
                 # TF-IDF variants
                 if tfidf_matrix is not None:

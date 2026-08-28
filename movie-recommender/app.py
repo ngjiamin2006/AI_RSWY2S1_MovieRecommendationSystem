@@ -556,12 +556,12 @@ def _best_match_recs(algorithm_name, pool_kwargs):
     if algorithm_name == "hybrid_tfidf" and tfidf_matrix is not None:
         return hybrid.recommend_tfidf(
             movies, tfidf_matrix, movie_ids, movie_id_to_row, vectorizer, user_item_matrix,
-            selected_genres=st.session_state.selected_genres, alpha=0.5, **common,
+            selected_genres=st.session_state.selected_genres, alpha=0.15, **common,
         )
     # "hybrid", or a fallback if the winning name needs TF-IDF data that isn't loaded
     return hybrid.recommend(
         movies, genre_matrix, movie_ids, movie_id_to_row, genre_names, user_item_matrix,
-        selected_genres=st.session_state.selected_genres, alpha=0.5, **common,
+        selected_genres=st.session_state.selected_genres, alpha=0.15, **common,
     )
 
 
@@ -751,7 +751,7 @@ with tab_home:
 with tab_ml:
     if not is_dev:
         render_hybrid_search(
-            alpha=0.5, show_analysis=False, show_search_log=False,
+            alpha=0.15, show_analysis=False, show_search_log=False,
             caption="Search for a movie you like -- we'll find similar ones for you. No liking/rating needed first.",
         )
     else:
@@ -863,7 +863,7 @@ with tab_ml:
                     render_recommendations(recs_item_based, "cf", score_label="Expected Rating")
 
         elif model_option == "Hybrid":
-            alpha = st.slider("Weight towards content-based (alpha)", 0.0, 1.0, 0.5, 0.1, key="hy_alpha")
+            alpha = st.slider("Weight towards content-based (alpha)", 0.0, 1.0, 0.15, 0.05, key="hy_alpha")
             render_hybrid_search(
                 alpha=alpha, show_analysis=True, show_search_log=True,
                 caption=(
