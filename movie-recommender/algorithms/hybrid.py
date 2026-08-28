@@ -195,11 +195,20 @@ def find_movie_by_search(movies, search_title: str, popularity: np.ndarray | Non
     # inside "Supercon" or "it" match inside "Ittefaq".
     pattern = r"\b" + re.escape(query) + r"\b"
     matches = movies[normalized_titles.str.contains(pattern, na=False, regex=True)]
-    if matches.empty:
-        return None, None, None
+    if not matches.empty:
+        best = _pick_best(matches)
+        return int(best["movieId"]), best["title"], best["genres"]
+        
+    # If no whole-word match, try a fuzzy match for typos
+    import difflib
+    all_norm_titles = normalized_titles.dropna().tolist()
+    close = difflib.get_close_matches(query, all_norm_titles, n=1, cutoff=0.6)
+    if close:
+        fuzzy_matches = movies[normalized_titles == close[0]]
+        best = _pick_best(fuzzy_matches)
+        return int(best["movieId"]), best["title"], best["genres"]
 
-    best = _pick_best(matches)
-    return int(best["movieId"]), best["title"], best["genres"]
+    return None, None, None
 
 
 def _normalize(arr: np.ndarray) -> np.ndarray:
