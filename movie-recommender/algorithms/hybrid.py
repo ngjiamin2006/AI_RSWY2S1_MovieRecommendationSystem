@@ -1,40 +1,5 @@
 """Hybrid recommender: blends content-based and collaborative filtering scores.
 
-OWNER: Member 3
-Runs both underlying algorithms and combines their similarity scores
-with a weight `alpha`. This directly addresses each one's weakness:
-content-based alone never learns from other users' behaviour;
-collaborative filtering alone can't handle a brand new user.
-
-Ideas for extending this beyond the baseline:
-- Learn `alpha` instead of hardcoding it (e.g. pick the value that
-  maximizes precision@k on a validation split in evaluation.py).
-- Switch the combination rule from weighted-average to rank fusion.
-
---------------------------------------------------------------------------
-Search-driven variant (recommend_by_search, below the original two
-functions) -- this is the version actually used by the Hybrid tab in the
-UI. It's deliberately self-contained (its own text cleaning, its own
-collaborative scoring) rather than reusing content_based.py /
-collaborative_filtering.py, since this module needs to be independently
-attributable to Member 3 for the presentation/Q&A.
-
-Differences from `recommend`/`recommend_tfidf` above (which are kept
-as-is because evaluation.py's offline precision/recall benchmark depends
-on their exact signature):
-- No "liked movies" state at all. The user searches a title; that movie's
-  own content vector + rating vector are the query. Works the same for a
-  brand-new session with zero history.
-- The collaborative half combines an item-based signal (movies with a
-  similar rating pattern to the searched movie) and a user-based signal
-  (what people who rated the searched movie highly also rated highly),
-  averaged together -- "combine user, item selection" -- both computed
-  directly off ratings, not likes.
-- Returns a frontend-safe DataFrame (movieId, title only) separately from
-  an analysis DataFrame (+ genres, content_score, collaborative_score,
-  score) -- the latter is for the report/evaluation, not the recommendation
-  cards.
-- Every search is appended to a CSV log for later analysis.
 """
 import csv
 import os
@@ -103,16 +68,6 @@ def recommend(_movies, _genre_matrix, _movie_ids, _movie_id_to_row, _genre_names
 
 def clean_text(text: str) -> str:
     """Lowercase, strip digits/punctuation, and drop English stop words.
-
-    Required preprocessing step for the assignment (grading checks input
-    validation/preprocessing explicitly) -- kept here as the demonstrable
-    "stop words / numbers / lowercase" cleaning step. NOT used for title
-    search matching below: stop-word removal is meant for long-form prose
-    (plot overviews), and is actively wrong for short titles, since a
-    common word can be the whole distinguishing part of a title ("Back
-    TO THE Future" vs "The Future" -- "back" and "to" and "the" are all
-    English stop words, and stripping them collapses both titles to just
-    "future"). See _normalize_title for the matching-safe version.
     """
     if not isinstance(text, str):
         return ""
@@ -151,24 +106,6 @@ def _normalize_title(text: str) -> str:
 def find_movie_by_search(movies, search_title: str, popularity: np.ndarray | None = None,
                           movie_id_to_row: dict | None = None):
     """Look up a single movie by title.
-
-    Tries an exact (normalized) title match first (handles "the matrix" ->
-    "Matrix, The (1999)" via _normalize_title's article un-inversion).
-    Falls back to a whole-word match -- e.g. "war" matches "War of the
-    Worlds" but not "Warrior".
-
-    Multiple exact or whole-word matches are common ("Up (2009)" vs. the
-    obscure "Up! (1976)"; "Star Wars" the franchise vs. an unrelated fan
-    film called "Star Wars: Dresca") -- shortest-title alone isn't a good
-    enough proxy for "the one the user means". When `popularity` (a
-    rating-count array in `movie_ids`/`movie_id_to_row` order -- pass
-    `user_item_matrix.getnnz(axis=1)`) is available, ties are broken by
-    whichever match has the most ratings; otherwise falls back to
-    shortest title.
-
-    Returns (movieId, exact_title, genres), or (None, None, None) on an
-    empty search or no match -- callers must handle both explicitly
-    rather than assume a match always exists (input validation).
     """
     query = _normalize_title(search_title)
     if not query:
@@ -258,22 +195,6 @@ def _user_based_cf_score(user_item_matrix, movie_id_to_row: dict, movie_ids: np.
 def _personalized_user_based_cf_score(user_item_matrix, movie_id_to_row: dict, movie_ids: np.ndarray,
                                        liked_movie_ids: list, k: int = 200, min_support: int = 3,
                                        like_rating: float = 5.0) -> np.ndarray:
-    """User-based CF driven by everything the user has liked this session,
-    not just the single searched movie -- this is the "add a like function
-    for the collaborative part" improvement: more liked movies = a sharper
-    picture of the user's taste = a more accurate neighborhood.
-
-    Builds a pseudo rating vector (liked movies = `like_rating`, everything
-    else 0), finds the k real users in the dataset whose ratings correlate
-    most with it, then scores every movie by the average rating that
-    neighborhood gave it. `min_support` drops movies rated by too few of
-    the neighborhood (a single enthusiastic outlier shouldn't outrank a
-    movie 20 similar users all rated highly).
-
-    Returns an all-zero array if there aren't any liked movies yet (brand
-    new session) -- callers should treat that as "no personalization
-    available", not an error.
-    """
     if not liked_movie_ids:
         return np.zeros(len(movie_ids))
 
@@ -307,25 +228,7 @@ def _personalized_user_based_cf_score(user_item_matrix, movie_id_to_row: dict, m
 
 def combined_collaborative_score(user_item_matrix, movie_id_to_row: dict, movie_ids: np.ndarray,
                                   target_movie_id: int, liked_movie_ids: list | None = None):
-    """Blend of ratings-only collaborative signals -- "combine user, item
-    selection" -- none of them use likes/binary signals for the *matching*,
-    only real ratings:
-    - item-based: movies with a similar rating pattern to the searched movie
-    - fan-based (user-based CF anchored on the searched movie): what fans
-      of the searched movie also rated highly
-    - personalized (user-based CF anchored on the user's full liked list,
-      when any likes exist this session) -- more accurate than fan-based
-      alone since it reflects everything the user has liked, not just one
-      title.
-
-    With no liked movies yet, this is exactly the original two-signal
-    blend (item + fan-based), so a brand-new session still works fine.
-
-    Returns (scores, personalized_used) -- the second value tells the
-    caller whether the liked list actually contributed a signal (e.g. it
-    won't if none of the liked ids exist in this dataset), so callers can
-    report accurate status rather than assuming any non-empty list helped.
-    """
+    
     item_scores = _item_based_cf_score(user_item_matrix, movie_id_to_row, movie_ids, target_movie_id)
     fan_scores = _user_based_cf_score(user_item_matrix, movie_id_to_row, movie_ids, target_movie_id)
     signals = [_normalize(item_scores), _normalize(fan_scores)]
@@ -333,7 +236,7 @@ def combined_collaborative_score(user_item_matrix, movie_id_to_row: dict, movie_
     personalized_used = False
     if liked_movie_ids:
         personalized_scores = _personalized_user_based_cf_score(user_item_matrix, movie_id_to_row, movie_ids,
-                                                                  liked_movie_ids)
+                                                                   liked_movie_ids)
         if personalized_scores.any():
             signals.append(_normalize(personalized_scores))
             personalized_used = True
@@ -342,14 +245,7 @@ def combined_collaborative_score(user_item_matrix, movie_id_to_row: dict, movie_
 
 
 def log_search(query: str, matched_title: str | None, path: str = SEARCH_LOG_PATH) -> None:
-    """Append one search-bar query to a CSV log for later analysis.
 
-    This is the "search bar should be recorded" requirement -- purely a
-    backend record (for the report / to see what people search for), never
-    read back into the frontend. A failed write (e.g. read-only filesystem
-    on some hosting setups) is swallowed since logging must never break a
-    recommendation request.
-    """
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         is_new = not os.path.exists(path)
@@ -366,45 +262,19 @@ def recommend_by_search(movies, content_matrix, user_item_matrix, movie_ids: np.
                          movie_id_to_row: dict, search_title: str, top_n: int = 10, alpha: float = 0.5,
                          liked_movie_ids: list | None = None, allowed_ids: set | None = None,
                          pool_size: int | None = None, sample_seed: int | None = None):
-    """Search-driven hybrid recommendation -- no liked movies *required*,
-    but they sharpen the collaborative half when present.
 
-    The user types a title; we find that movie, take its own content
-    vector (`content_matrix` -- pass the TF-IDF overview/genre/keyword
-    matrix from data_loader.build_tfidf_matrix when available, or the
-    plain genre one-hot matrix as a fallback when TMDb wasn't downloaded;
-    either works since both are just (n_movies, n_features) matrices in
-    `movie_ids` row order) and its rating vector, and blend:
-    - content_score: cosine similarity of the searched movie's content
-      vector to every other movie (genre/overview/keywords/cast/director).
-    - collaborative_score: combined_collaborative_score() above -- item-
-      based CF, fan-based CF (anchored on the searched movie), and, if
-      `liked_movie_ids` is non-empty, a personalized user-based CF signal
-      built from the *whole* liked list. More likes = a sharper
-      neighborhood = a more accurate collaborative score.
-    combined = alpha * content_score + (1 - alpha) * collaborative_score.
-    alpha=1.0 -> pure content, alpha=0.0 -> pure collaborative.
-
-    Movies already in `liked_movie_ids` are excluded from the results
-    alongside the searched movie itself -- no point recommending back
-    something the user already told us they like.
-
-    Returns (display, meta):
-    - display: DataFrame with only movieId + title -- what the frontend
-      cards should render. No score, no genre.
-    - meta: dict with "matched_title", "matched_movie_id", "matched_genres",
-      "personalized" (bool -- whether liked movies actually contributed a
-      signal), and "analysis" (movieId, title, genres, content_score,
-      collaborative_score, score) -- for the report/backend only, not
-      display.
-    On bad/empty input or no match, returns (None, {"error": "..."}) so the
-    caller can show a clean message instead of crashing.
-    """
     alpha = min(max(alpha, 0.0), 1.0)  # defensive clamp -- a slider can't
     # send an out-of-range value, but this function shouldn't assume that.
     liked_movie_ids = liked_movie_ids or []
 
-    target_movie_id, matched_title, matched_genres = find_movie_by_search(movies, search_title)
+    # Rating count per movie (nonzero entries per row) doubles as a cheap
+    # popularity signal so an ambiguous search (e.g. "jedi", "star wars")
+    # resolves to the well-known movie instead of falling back to
+    # find_movie_by_search's shortest-title tiebreak.
+    popularity = np.asarray((user_item_matrix > 0).sum(axis=1)).ravel()
+    target_movie_id, matched_title, matched_genres = find_movie_by_search(
+        movies, search_title, popularity=popularity, movie_id_to_row=movie_id_to_row
+    )
     log_search(search_title, matched_title)
 
     if target_movie_id is None:
@@ -437,7 +307,7 @@ def recommend_by_search(movies, content_matrix, user_item_matrix, movie_ids: np.
     analysis["score"] = analysis["movieId"].map(lambda mid: combined[movie_id_to_row[mid]])
     analysis = analysis.sort_values("score", ascending=False).reset_index(drop=True)
 
-    display = analysis[["movieId", "title"]].copy()
+    display = analysis[["movieId", "title", "genres"]].copy()
     meta = {
         "matched_title": matched_title, "matched_movie_id": target_movie_id,
         "matched_genres": matched_genres, "personalized": personalized_used,
