@@ -43,6 +43,8 @@ python -m venv venv
 venv\Scripts\activate
 streamlit run app.py
 ```
+# developer view
+http://localhost:8501/?dev=1
 
 This opens the app in your browser (default `http://localhost:8501`). Pick a few favorite genres and/or like some recommendations, then browse each algorithm's tab (posters, year filter, refresh button) and check the **Evaluation** tab for metrics.
 

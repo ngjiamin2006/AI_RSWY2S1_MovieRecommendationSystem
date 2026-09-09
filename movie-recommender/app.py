@@ -221,9 +221,9 @@ if "feedbacks" not in st.session_state:
     st.session_state.feedbacks = []
 if "local_profiles" not in st.session_state:
     st.session_state.local_profiles = {
-        "User 1": [],
-        "User 2": [],
-        "User 3": [],
+        "User 1": [2571, 260, 1196], # Sci-Fi/Action: Matrix, Star Wars IV, V
+        "User 2": [1, 364, 588],     # Animation: Toy Story, Lion King, Aladdin
+        "User 3": [318, 356, 1721],  # Drama/Romance: Shawshank, Forrest Gump, Titanic
         "User 4": []
     }
 if "current_user" not in st.session_state:
@@ -353,15 +353,18 @@ def render_recommendations(df, key_prefix, show_score=True, score_label="score")
                 score_str = ""
                 score_val = row.get("score") if "score" in row else row.get("rating")
                 if show_score and score_val is not None and not pd.isna(score_val):
-                    # Using title() in case score_label is lowercase
-                    label = score_label.title()
-                    # If it's a count (like number of ratings), format as integer, else as a 2-decimal float
-                    if label.lower() == "ratings" or "count" in label.lower():
-                        score_str = f"Total Reviews: {int(score_val):,}"
-                    elif label.lower() == "similarity" or (label.lower() == "score" and score_val <= 1.0):
-                        score_str = f"Similarity: {float(score_val)*100:.0f}%"
+                    if isinstance(score_val, str):
+                        score_str = score_val
                     else:
-                        score_str = f"{label}: {float(score_val):.2f}/5.0"
+                        # Using title() in case score_label is lowercase
+                        label = score_label.title()
+                        # If it's a count (like number of ratings), format as integer, else as a 2-decimal float
+                        if label.lower() == "ratings" or "count" in label.lower():
+                            score_str = f"Total Reviews: {int(score_val):,}"
+                        elif label.lower() == "similarity" or (label.lower() == "score" and score_val <= 1.0):
+                            score_str = f"Similarity: {float(score_val)*100:.0f}%"
+                        else:
+                            score_str = f"{label}: {float(score_val):.2f}/5.0"
                 elif "release_date" in row:
                     score_str = f"Released: {row['release_date']}"
                 
@@ -453,7 +456,23 @@ def search_and_like(text_key, render_prefix, help_text="Click 'Like' to add them
             st.success(f"Found {len(results)} movies. {help_text}")
             results = results.copy()
             results["score"] = results["movieId"].map(movie_avg_ratings)
-            render_recommendations(results, render_prefix, score_label="Average Rating")
+            score_label = "Average Rating"
+            
+            if model_option == "Collaborative Filtering" and st.session_state.liked_movie_ids:
+                cf_scores = collaborative_filtering.recommend(
+                    movies, user_item_matrix, movie_ids, movie_id_to_row,
+                    liked_movie_ids=st.session_state.liked_movie_ids,
+                    top_n=len(results),
+                    allowed_ids=set(results["movieId"].tolist())
+                )
+                if cf_scores is not None and not cf_scores.empty:
+                    pred_map = dict(zip(cf_scores["movieId"], cf_scores["rating"]))
+                    results["score"] = results.apply(
+                        lambda r: pred_map.get(r["movieId"], r["score"]), axis=1
+                    )
+                    score_label = "Expected Rating"
+            
+            render_recommendations(results, render_prefix, score_label=score_label)
 
 
 def search_movies_cb(text_key="cb_search_input", render_prefix="cb_search"):
@@ -852,13 +871,72 @@ with tab_ml:
             if not st.session_state.liked_movie_ids:
                 render_recommendations(None, "cf")
             else:
+                # =====================================================================
+                # --- Dynamic Model Accuracy Demo (MSE - Mean Squared Error) ---
+                # =====================================================================
+                # To make this fully dynamic and responsive to YOUR clicks:
+                # We split your 'Liked' movies into a 'Training Set' and a 'Test Set'.
+                # We assume any movie you liked has an 'Actual Rating' of 5.0.
+                
+                likes = st.session_state.liked_movie_ids
+                if len(likes) >= 2:
+                    import random
+                    
+                    # Step 1: Randomly hide a few of your liked movies to test the algorithm
+                    num_to_test = max(1, len(likes) // 3)
+                    
+                    # Use a seed based on the user's total likes so it only changes when they add a new like!
+                    random.seed(sum(likes))
+                    test_mids = random.sample(likes, num_to_test)
+                    train_mids = [m for m in likes if m not in test_mids]
+                    
+                    # Step 2: Ask the CF algorithm to predict ratings for the hidden movies, 
+                    # relying ONLY on the remaining 'Training' movies.
+                    cf_test_scores = collaborative_filtering.recommend(
+                        movies, user_item_matrix, movie_ids, movie_id_to_row,
+                        liked_movie_ids=train_mids,
+                        top_n=len(test_mids),
+                        allowed_ids=set(test_mids)
+                    )
+                    
+                    if not cf_test_scores.empty:
+                        df_rows = []
+                        errors = []
+                        
+                        # Step 3: Calculate the Squared Error
+                        for _, row in cf_test_scores.iterrows():
+                            target_mid = int(row["movieId"])
+                            pred = row["rating"]  # recommend() returns 'rating', not 'score'
+                            actual = 5.0  # Since you clicked 'Like', we treat the actual rating as 5.0
+                            
+                            squared_error = (actual - pred)**2
+                            errors.append(squared_error)
+                            df_rows.append({
+                                "movieId": target_mid,
+                                "actual": actual,
+                                "pred": pred,
+                                "mse": squared_error
+                            })
+                        
+                        if df_rows:
+                            mse = sum(errors) / len(errors)
+                            st.write(f"### 🎯 Model Prediction Accuracy Demo (MSE: {mse:.3f})")
+                            st.caption(f"We took your {len(likes)} Liked movies, hid {len(test_mids)} of them, and asked the algorithm to predict your score based on the rest. Here are the results:")
+                            
+                            test_df = movies[movies["movieId"].isin([r["movieId"] for r in df_rows])].copy()
+                            score_map = {r["movieId"]: f"Act: {r['actual']:.1f} | Pred: {r['pred']:.1f} | MSE: {r['mse']:.2f}" for r in df_rows}
+                            test_df["score"] = test_df["movieId"].map(score_map)
+                            
+                            render_recommendations(test_df, "cf_acc", show_score=True)
+                            st.divider()
+
                 cc1, cc2 = st.columns([5, 1])
                 with cc1:
                     st.write("### Recommended for you")
                 with cc2:
                     pool_kwargs = refresh_controls("cf")
                 
-                recs, explanation = collaborative_filtering.recommend_user_based(
+                recs, explanation, jaccard_score = collaborative_filtering.recommend_user_based(
                     movies, user_item_matrix, movie_ids, movie_id_to_row,
                     current_user=st.session_state.current_user,
                     local_profiles=st.session_state.local_profiles, top_n=30
@@ -866,9 +944,34 @@ with tab_ml:
 
                 if explanation:
                     st.info(explanation)
+                
+                # --- Developer Metrics Panel ---
+                if is_dev:
+                    dm1, dm2, dm3 = st.columns(3)
+                    dm1.metric("Jaccard Similarity", f"{jaccard_score:.3f}", help="Overlap between your likes and the best matched user's likes (Intersection ÷ Union)")
+                    dm2.metric("Similarity Method", "Cosine + Correlation", help="Cosine Similarity and Pearson Correlation Similarity are both computed per movie")
+                    dm3.metric("K (Top-K Neighbors)", "20", help="predict_rating() uses Top-K=20 most similar movies to compute a weighted average prediction")
+                    st.divider()
 
                 if recs is not None and not recs.empty:
-                    render_recommendations(recs, "cf", score_label="Expected Rating")
+                    if is_dev:
+                        # Compute Correlation only for the ~30 displayed movies (memory-safe)
+                        displayed_mids = recs["movieId"].tolist()
+                        corr_map = collaborative_filtering.compute_correlation_for_rows(
+                            user_item_matrix, movie_id_to_row,
+                            st.session_state.liked_movie_ids, displayed_mids
+                        )
+                        cosine_scores_arr = collaborative_filtering.compute_cf_scores(
+                            user_item_matrix, movie_id_to_row, st.session_state.liked_movie_ids
+                        )
+                        recs = recs.copy()
+                        recs["score"] = recs["movieId"].apply(
+                            lambda mid: f"Cosine: {cosine_scores_arr[movie_id_to_row[mid]]:.3f} | Corr: {corr_map.get(mid, 0):.3f}"
+                            if mid in movie_id_to_row else "N/A"
+                        )
+                        render_recommendations(recs, "cf", score_label="Score")
+                    else:
+                        render_recommendations(recs, "cf", score_label="Expected Rating")
                 else:
                     st.warning("Falling back to standard Item-Based CF from the full dataset (no local users matched).")
                     recs_item_based = collaborative_filtering.recommend(
@@ -876,7 +979,23 @@ with tab_ml:
                         liked_movie_ids=st.session_state.liked_movie_ids, top_n=30,
                         allowed_ids=allowed_ids, **pool_kwargs,
                     )
-                    render_recommendations(recs_item_based, "cf", score_label="Expected Rating")
+                    if is_dev and recs_item_based is not None:
+                        displayed_mids = recs_item_based["movieId"].tolist()
+                        corr_map = collaborative_filtering.compute_correlation_for_rows(
+                            user_item_matrix, movie_id_to_row,
+                            st.session_state.liked_movie_ids, displayed_mids
+                        )
+                        cosine_scores_arr = collaborative_filtering.compute_cf_scores(
+                            user_item_matrix, movie_id_to_row, st.session_state.liked_movie_ids
+                        )
+                        recs_item_based = recs_item_based.copy()
+                        recs_item_based["score"] = recs_item_based["movieId"].apply(
+                            lambda mid: f"Cosine: {cosine_scores_arr[movie_id_to_row[mid]]:.3f} | Corr: {corr_map.get(mid, 0):.3f}"
+                            if mid in movie_id_to_row else "N/A"
+                        )
+                        render_recommendations(recs_item_based, "cf", score_label="Score")
+                    else:
+                        render_recommendations(recs_item_based, "cf", score_label="Expected Rating")
 
         elif model_option == "Hybrid":
             alpha = st.slider("Weight towards content-based (alpha)", 0.0, 1.0, 0.15, 0.05, key="hy_alpha")
