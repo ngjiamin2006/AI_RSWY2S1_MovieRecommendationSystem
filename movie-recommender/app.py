@@ -959,11 +959,12 @@ with tab_ml:
                 with cc2:
                     pool_kwargs = refresh_controls("cf")
                 
-                recs, explanation, _ = collaborative_filtering.recommend_user_based(
+                result = collaborative_filtering.recommend_user_based(
                     movies, user_item_matrix, movie_ids, movie_id_to_row,
                     current_user=st.session_state.current_user,
                     local_profiles=st.session_state.local_profiles, top_n=30
                 )
+                recs, explanation, jaccard_score = result[:3]
 
                 if explanation:
                     st.info(explanation)
@@ -974,7 +975,9 @@ with tab_ml:
                     dm1.metric("Jaccard Similarity", f"{jaccard_score:.3f}", help="Overlap between your likes and the best matched user's likes (Intersection ÷ Union)")
                     dm2.metric("Similarity Method", "Cosine + Correlation", help="Cosine Similarity and Pearson Correlation Similarity are both computed per movie")
                     dm3.metric("K (Top-K Neighbors)", "20", help="predict_rating() uses Top-K=20 most similar movies to compute a weighted average prediction")
+
                     st.divider()
+
 
                 if recs is not None and not recs.empty:
                     if is_dev:
