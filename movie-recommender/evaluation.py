@@ -143,6 +143,7 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
 
     for user_id in test_users:
         user_train = train_ratings[train_ratings["userId"] == user_id]
+        user_mean_rating = float(user_train["rating"].mean()) if not user_train.empty else 3.5
         liked = user_train[user_train["rating"] >= LIKE_THRESHOLD]["movieId"].tolist()
         if not liked:
             continue
@@ -165,11 +166,7 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
                           liked_movie_ids=liked, top_n=k, _cf_scores=cf_scores)
         recs_by_name = {"collaborative": (cf, cf_t)}
 
-        # content-based: search-driven only, never a liked_movie_ids profile.
-        # Stand-in for "the user searched for a movie" -- their single
-        # highest-rated training movie (the one they'd most plausibly search
-        # for) becomes the query, scored against the same held-out relevant
-        # set as everyone else.
+        # content-based: single search seed query (highest rated movie).
         seed_movie_id = int(user_train.loc[user_train["rating"].idxmax(), "movieId"])
         cb, cb_t = timed(content_based.recommend_by_search, movies, cb_matrix, movie_ids, movie_id_to_row,
                           matched_movie_ids=[seed_movie_id], top_n=k)
@@ -183,6 +180,13 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
         for name, (recs, elapsed) in recs_by_name.items():
             ids = recs["movieId"].tolist() if recs is not None else []
             p, r, f1 = precision_recall_f1_at_k(ids, relevant, k)
+            # DEBUG: show what content_based is recommending for first few users
+            if name == "content_based" and user_id == test_users[0]:
+                print(f"\n  DEBUG {name}: user={user_id}")
+                print(f"    recs={ids[:10]}")
+                print(f"    relevant (test liked)={relevant}")
+                print(f"    hits={len(set(ids[:k]) & relevant)}")
+                print(f"    training liked (excluded from recs)={liked}")
             metrics[name]["precision"].append(p)
             metrics[name]["recall"].append(r)
             metrics[name]["f1"].append(f1)
@@ -192,14 +196,14 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
             if diversity is not None:
                 diversity_scores[name].append(diversity)
 
-        # hybrid's own liked-movies profile (content-based itself is
-        # search-driven only and isn't scored via a profile -- these two
-        # exist purely to feed the hybrid/hybrid_tfidf blend below).
+        # hybrid's own liked-movies profile
         profile_cb = content_based.build_user_profile(genre_matrix, movie_id_to_row, liked)
         profile_cb_tfidf = None
         if tfidf_matrix is not None:
             profile_cb_tfidf = content_based.build_tfidf_profile(tfidf_matrix, movie_id_to_row, liked, vectorizer)
-        seed_row_idx = movie_id_to_row.get(seed_movie_id)  # for content-based's search-driven rating prediction
+        
+        # rating prediction seed row index
+        seed_row_idx = movie_id_to_row.get(seed_movie_id)
 
         if user_id in user_id_to_col:
             col = user_id_to_col[user_id]
@@ -217,30 +221,19 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
                 pred_cf = collaborative_filtering.predict_rating(user_item_matrix, movie_id_to_row, col, target_mid)
                 preds["collaborative"] = pred_cf
                 
-                # CB prediction (search-driven): similarity between the seed
-                # movie (this user's synthetic search query) and the held-out
-                # movie -- same query used for the ranking metrics above.
-                pred_cb_search = None
+                # CB prediction: scaled around user mean rating
+                pred_cb = None
                 if seed_row_idx is not None:
                     sim = cosine_similarity(
                         cb_matrix[seed_row_idx:seed_row_idx + 1], cb_matrix[target_row_idx:target_row_idx + 1]
                     )[0, 0]
-                    pred_cb_search = max(0.0, min(5.0, sim * 5.0))
-                preds["content_based"] = pred_cb_search
+                    # Scale similarity: baseline user mean + (sim - average_expected_sim) * factor
+                    pred_cb = max(1.0, min(5.0, user_mean_rating + (sim - 0.15) * 2.5))
+                preds["content_based"] = pred_cb
 
-                # CB prediction (liked-profile, scale 0-1 similarity to 0-5 rating)
-                # -- intermediate only, not the content_based row above; needed
-                # here purely to feed the hybrid prediction below.
-                pred_cb = None
-                if profile_cb is not None:
-                    target_vec = genre_matrix[target_row_idx].reshape(1, -1)
-                    sim = cosine_similarity(profile_cb, target_vec)[0, 0]
-                    pred_cb = max(0.0, min(5.0, sim * 5.0))
-
-                # Basic hybrid prediction removed to only evaluate hybrid_tfidf
+                # CB prediction (hybrid TF-IDF)
                 alpha = 0.15
                 
-                # TF-IDF variants
                 if tfidf_matrix is not None:
                     pred_cb_tfidf = None
                     if profile_cb_tfidf is not None:
@@ -248,7 +241,7 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
                         if not isinstance(profile_cb_tfidf, np.ndarray):
                             profile_cb_tfidf = np.asarray(profile_cb_tfidf)
                         sim = cosine_similarity(profile_cb_tfidf.reshape(1, -1), target_vec)[0, 0]
-                        pred_cb_tfidf = max(0.0, min(5.0, sim * 5.0))
+                        pred_cb_tfidf = max(1.0, min(5.0, user_mean_rating + (sim - 0.15) * 2.5))
 
                     if pred_cb_tfidf is not None and pred_cf is not None:
                         preds["hybrid_tfidf"] = alpha * pred_cb_tfidf + (1 - alpha) * pred_cf

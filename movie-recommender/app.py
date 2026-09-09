@@ -5,7 +5,10 @@ Run with: streamlit run app.py
 import html
 
 import streamlit as st  # type: ignore[missing-import]
+import numpy as np
 import pandas as pd
+from sklearn.metrics.pairwise import cosine_similarity
+from text_utils import clean_text
 from data_loader import (
     load_data, build_genre_matrix, build_user_item_matrix, get_popular_movies,
     get_most_rated_movies, get_new_releases, load_links, attach_tmdb_metadata,
@@ -352,19 +355,33 @@ def render_recommendations(df, key_prefix, show_score=True, score_label="score")
                 
                 score_str = ""
                 score_val = row.get("score") if "score" in row else row.get("rating")
+
                 if show_score and score_val is not None and not pd.isna(score_val):
+
                     if isinstance(score_val, str):
                         score_str = score_val
+
                     else:
                         # Using title() in case score_label is lowercase
                         label = score_label.title()
-                        # If it's a count (like number of ratings), format as integer, else as a 2-decimal float
+
+                        # If it's a count (like number of ratings), format as integer
                         if label.lower() == "ratings" or "count" in label.lower():
                             score_str = f"Total Reviews: {int(score_val):,}"
-                        elif label.lower() == "similarity" or (label.lower() == "score" and score_val <= 1.0):
-                            score_str = f"Similarity: {float(score_val)*100:.0f}%"
+
+                        # Cosine similarity
+                        elif "similarity" in label.lower() or (
+                            label.lower() == "score" and score_val <= 1.0
+                        ):
+                            score_str = (
+                                f"🎯 Cosine Sim: "
+                                f"{float(score_val) * 100:.1f}% "
+                                f"({float(score_val):.3f})"
+                            )
+
                         else:
                             score_str = f"{label}: {float(score_val):.2f}/5.0"
+
                 elif "release_date" in row:
                     score_str = f"Released: {row['release_date']}"
                 
@@ -373,28 +390,29 @@ def render_recommendations(df, key_prefix, show_score=True, score_label="score")
                 if genres and genres[0] != 'nan':
                     genre_str = f"{', '.join(genres[:2])}"
 
+                # Average community rating fallback if available
+                avg_rat = movie_avg_ratings.get(row['movieId'])
+                avg_rat_str = f"⭐ {avg_rat:.1f}" if avg_rat and "Cosine Sim" in score_str else ""
+                sub_info = f"{avg_rat_str} • {genre_str}".strip(" •") if avg_rat_str else genre_str
+
                 # Plain-language synopsis so it's obvious *why* a movie was
                 # recommended even when the search word isn't in its title
-                # (e.g. searching "cat" can surface a movie whose synopsis
-                # mentions a cat, not its title) -- escaped since this is
-                # external TMDb text being injected into raw HTML.
                 overview = overview_lookup.get(row["movieId"])
                 overview_str = html.escape(overview.strip()) if isinstance(overview, str) and overview.strip() else ""
 
                 # Use a fixed-height container to ensure all cards are identical in height
-                # margin-top: auto pushes the score/genre block to the bottom, aligning it with the button
                 st.markdown(
                     f'<div style="height: 240px; display: flex; flex-direction: column; margin-bottom: 10px;">'
                     f'<strong style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-overflow: ellipsis; font-size: 1rem; line-height: 1.2;">'
                     f'{title}</strong>'
-                    f'<div style="display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; '
+                    f'<div style="display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; '
                     f'color: #a0a0a0; font-size: 0.8rem; line-height: 1.3; margin-top: 6px;">'
                     f'{overview_str}</div>'
                     f'<div style="margin-top: auto;">'
-                    f'<div style="color: #a0a0a0; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">'
+                    f'<div style="color: #60a5fa; font-weight: 600; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">'
                     f'{score_str}</div>'
-                    f'<div style="color: #a0a0a0; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">'
-                    f'{genre_str}</div>'
+                    f'<div style="color: #a0a0a0; font-size: 0.82rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">'
+                    f'{sub_info}</div>'
                     f'</div>'
                     f'</div>',
                     unsafe_allow_html=True
@@ -435,59 +453,67 @@ def refresh_controls(key_prefix):
     return {"pool_size": 30, "sample_seed": count} if count > 0 else {}
 
 
-def search_and_like(text_key, render_prefix, help_text="Click 'Like' to add them to your profile."):
-    """Search-by-title + Like -- the original Home tab search pattern,
-    parameterized so each tab's search box/results use independent
-    session-state keys (each tab can be searched and tested separately).
+def perform_similarity_search(query, top_n=15):
+    """Semantic content search: builds a rich content profile from matched titles (or TF-IDF text),
+    calculates Cosine Similarity across all catalog movies, and returns the top 15 highest similarity items.
     """
+    if not query or not str(query).strip():
+        return movies.head(0)
+    
+    q_str = str(query).strip()
+    q_clean = clean_text(q_str)
+    title_matches = movies[movies['title'].str.contains(q_str, case=False, na=False)]
+    
+    match_rows = [movie_id_to_row[mid] for mid in title_matches['movieId'] if mid in movie_id_to_row] if not title_matches.empty else []
+    
+    scores = None
+    
+    # 1. Primary: build rich profile vector from all matched movies' cb_matrix rows (genres + cast + director + keywords + overview)
+    if match_rows:
+        prof = np.asarray(cb_matrix[match_rows].mean(axis=0))
+        scores = cosine_similarity(prof, cb_matrix)[0]
+    # 2. Secondary: embed search query text via TF-IDF vectorizer against tfidf_matrix
+    elif vectorizer is not None and tfidf_matrix is not None and q_clean:
+        try:
+            q_vec = vectorizer.transform([q_clean])
+            if q_vec.nnz > 0:
+                scores = cosine_similarity(q_vec, tfidf_matrix)[0]
+        except Exception:
+            scores = None
+            
+    if scores is None or len(scores) == 0:
+        return movies.head(0)
+        
+    res_df = movies.copy()
+    res_df["score"] = scores
+    
+    # Filter non-zero similarity scores and sort strictly descending (highest Cosine Similarity first)
+    res_df = res_df[res_df["score"] > 0].sort_values("score", ascending=False).head(top_n).reset_index(drop=True)
+    return res_df
+
+
+def search_and_like(text_key, render_prefix, help_text="Click 'Like' to add them to your profile."):
+    """Search-by-title + Like -- parameterized search returning top 15 similarity matches."""
     with st.form(key=f"{text_key}_form"):
         col1, col2 = st.columns([5, 1])
         with col1:
-            query = st.text_input("Enter movie title...", placeholder="e.g. Inception or Toy Story", key=text_key)
+            query = st.text_input("Enter movie title or keyword...", placeholder="e.g. Inception, Toy Story, space alien", key=text_key)
         with col2:
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
             st.form_submit_button("Search", use_container_width=True)
             
     if query:
-        results = movies[movies['title'].str.contains(query, case=False, na=False)].head(20)
+        results = perform_similarity_search(query, top_n=15)
+        
         if results.empty:
             st.warning(f"No movies found matching '{query}'.")
         else:
-            st.success(f"Found {len(results)} movies. {help_text}")
-            results = results.copy()
-            results["score"] = results["movieId"].map(movie_avg_ratings)
-            score_label = "Average Rating"
-            
-            if model_option == "Collaborative Filtering" and st.session_state.liked_movie_ids:
-                cf_scores = collaborative_filtering.recommend(
-                    movies, user_item_matrix, movie_ids, movie_id_to_row,
-                    liked_movie_ids=st.session_state.liked_movie_ids,
-                    top_n=len(results),
-                    allowed_ids=set(results["movieId"].tolist())
-                )
-                if cf_scores is not None and not cf_scores.empty:
-                    pred_map = dict(zip(cf_scores["movieId"], cf_scores["rating"]))
-                    results["score"] = results.apply(
-                        lambda r: pred_map.get(r["movieId"], r["score"]), axis=1
-                    )
-                    score_label = "Expected Rating"
-            
-            render_recommendations(results, render_prefix, score_label=score_label)
+            st.success(f"Found top {len(results)} movies matching '{query}' (sorted by Cosine Similarity). {help_text}")
+            render_recommendations(results, render_prefix, score_label="Cosine Similarity")
 
 
 def search_movies_cb(text_key="cb_search_input", render_prefix="cb_search"):
-    """Content-Based tab's search bar: type a keyword and press Enter to see
-    every matching title (never silently guesses a single one -- an
-    ambiguous keyword like "marvel" would otherwise pick the wrong movie).
-    All matches together become the profile for content_based.recommend_by_search(),
-    stored as cb_matched_ids -- unlike search_and_like(), nothing is
-    appended to liked_movie_ids.
-
-    Every *distinct* query this session also gets folded into
-    cb_search_history/cb_query_history -- still search-driven (never the
-    Like button), just a broader query than the current single search, used
-    by the "Because you searched..." section in the app.
-    """
+    """Content-Based search: returns top 15 movies sorted by Cosine Similarity."""
     with st.form(key=f"{text_key}_form"):
         col1, col2 = st.columns([5, 1])
         with col1:
@@ -500,15 +526,13 @@ def search_movies_cb(text_key="cb_search_input", render_prefix="cb_search"):
             st.form_submit_button("Search", use_container_width=True)
             
     if query:
-        matches = movies[movies['title'].str.contains(query, case=False, na=False)].head(20)
+        matches = perform_similarity_search(query, top_n=15)
         if matches.empty:
             st.warning(f"No movies found matching '{query}'.")
             st.session_state.cb_matched_ids = []
         else:
-            st.success(f"Found {len(matches)} movies matching '{query}'.")
-            matches = matches.copy()
-            matches["score"] = matches["movieId"].map(movie_avg_ratings)
-            render_recommendations(matches, render_prefix, score_label="Average Rating")
+            st.success(f"Found top {len(matches)} movies matching '{query}' (sorted by Cosine Similarity).")
+            render_recommendations(matches, render_prefix, score_label="Cosine Similarity")
             st.session_state.cb_matched_ids = matches['movieId'].tolist()
 
             if query != st.session_state.cb_last_query:
@@ -834,34 +858,13 @@ with tab_ml:
 
         elif model_option == "Content-Based":
             st.caption(
-                "Search movies by keyword -- every match found is used together (never just one "
-                "guessed match) to find similar movies by genre + overview. This tab does not use "
-                "the Like button as input -- every distinct search you make this session builds one "
-                "running \"Because you searched...\" profile, the same way Netflix keeps surfacing "
-                "things related to what you've searched for."
+                "Search movies by title or plot keyword -- returns the top 15 highest similarity matches "
+                "sorted by Cosine Similarity."
             )
             if tfidf_matrix is None:
                 st.info("TMDb overview data isn't available -- similarity is genre-only for this tab. See the sidebar warning above.")
 
             search_movies_cb()
-
-            query_history = st.session_state.cb_query_history
-            if query_history:
-                st.divider()
-                cc1, cc2, cc3 = st.columns([4, 1, 1])
-                with cc1:
-                    st.write(f"### Because you searched {', '.join(query_history)}...")
-                with cc2:
-                    pool_kwargs = refresh_controls("cb_hist")
-                with cc3:
-                    st.button("Reset History", key="cb_clear_history", on_click=clear_cb_search_history, use_container_width=True)
-
-                history_recs = content_based.recommend_by_search(
-                    movies, cb_matrix, movie_ids, movie_id_to_row,
-                    matched_movie_ids=st.session_state.cb_search_history, top_n=30,
-                    allowed_ids=allowed_ids, **pool_kwargs,
-                )
-                render_recommendations(history_recs, "cb_hist")
 
         elif model_option == "Collaborative Filtering":
             st.caption("Uses User-Based Collaborative Filtering to find users with similar tastes and recommends their highly-rated movies.")
@@ -1029,7 +1032,8 @@ if is_dev:
 
             algo_names = {
                 "collaborative": "Collaborative Filtering",
-                "content_based": "Content-Based",
+                "content_based": "Content-Based (Search Seed)",
+                "content_based_profile": "Content-Based (User Profile)",
                 "hybrid": "Hybrid",
                 "hybrid_tfidf": "Hybrid (TF-IDF)"
             }

@@ -100,8 +100,8 @@ def recommend_by_search(_movies, _matrix, _movie_ids: np.ndarray, _movie_id_to_r
     if not rows:
         return None
 
-    profile = np.asarray(_matrix[rows].mean(axis=0))
-    scores = cosine_similarity(profile, _matrix)[0]
+    sims = cosine_similarity(_matrix[rows], _matrix)
+    scores = sims.max(axis=0)
     exclude = set(matched_movie_ids)
     results = select_top_n(scores, _movie_ids, exclude, allowed_ids, top_n, pool_size, sample_seed)
     if not results:
