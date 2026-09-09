@@ -236,7 +236,7 @@ def combined_collaborative_score(user_item_matrix, movie_id_to_row: dict, movie_
     personalized_used = False
     if liked_movie_ids:
         personalized_scores = _personalized_user_based_cf_score(user_item_matrix, movie_id_to_row, movie_ids,
-                                                                  liked_movie_ids)
+                                                                   liked_movie_ids)
         if personalized_scores.any():
             signals.append(_normalize(personalized_scores))
             personalized_used = True
