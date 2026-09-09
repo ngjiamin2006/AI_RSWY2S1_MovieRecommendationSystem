@@ -578,11 +578,15 @@ def render_hybrid_cards(display_df, key_prefix="hy"):
     Poster + title, plus a Like toggle that feeds the shared
     st.session_state.liked_movie_ids -- liking movies here sharpens the
     personalized user-based CF signal (_personalized_user_based_cf_score
-    in hybrid.py) on the *next* search. No score, no genre shown here:
-    those live in meta["analysis"] for the report/backend (per spec).
-    Synopsis is shown though, kept consistent with every other algorithm's
-    cards (render_recommendations) so the "why was this recommended" cue
-    is available everywhere, not just Content-Based/Home/CF.
+    in hybrid.py) on the *next* search. Average rating and genre are shown
+    (rating from the global movie_avg_ratings lookup, genre from the
+    "genres" column hybrid.py's recommend_by_search now includes in its
+    display df) -- the blended similarity score itself stays out of the
+    user-facing card and lives only in meta["analysis"] for the
+    report/backend (per spec). Synopsis is shown too, kept consistent with
+    every other algorithm's cards (render_recommendations) so the "why was
+    this recommended" cue is available everywhere, not just
+    Content-Based/Home/CF.
     """
     if display_df is None or display_df.empty:
         return
@@ -611,13 +615,25 @@ def render_hybrid_cards(display_df, key_prefix="hy"):
                 overview = overview_lookup.get(row["movieId"])
                 overview_str = html.escape(overview.strip()) if isinstance(overview, str) and overview.strip() else ""
 
+                rating_val = movie_avg_ratings.get(row["movieId"])
+                rating_str = f"⭐ {rating_val:.2f}/5.0" if rating_val is not None and not pd.isna(rating_val) else ""
+
+                genre_list = [g for g in str(row.get("genres", "")).split("|") if g and g != "(no genres listed)"]
+                genre_str = ", ".join(genre_list[:2]) if genre_list else ""
+
                 st.markdown(
-                    f'<div style="height: 200px; display: flex; flex-direction: column; margin-bottom: 10px;">'
+                    f'<div style="height: 240px; display: flex; flex-direction: column; margin-bottom: 10px;">'
                     f'<strong style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-overflow: ellipsis; font-size: 1rem; line-height: 1.2;">'
                     f'{title}</strong>'
                     f'<div style="display: -webkit-box; -webkit-line-clamp: 6; -webkit-box-orient: vertical; overflow: hidden; '
                     f'color: #a0a0a0; font-size: 0.8rem; line-height: 1.3; margin-top: 6px;">'
                     f'{overview_str}</div>'
+                    f'<div style="margin-top: auto;">'
+                    f'<div style="color: #a0a0a0; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">'
+                    f'{rating_str}</div>'
+                    f'<div style="color: #a0a0a0; font-size: 0.85rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">'
+                    f'{genre_str}</div>'
+                    f'</div>'
                     f'</div>', unsafe_allow_html=True,
                 )
                 is_liked = row["movieId"] in st.session_state.liked_movie_ids
@@ -1060,4 +1076,4 @@ with st.sidebar:
 
 if st.session_state.get("just_liked", False):
     st.toast("Update complete! Your recommendations are ready.", icon="✅")
-    st.session_state.just_liked = False
+    st.session_state.just_liked = False 
