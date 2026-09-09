@@ -224,9 +224,9 @@ if "feedbacks" not in st.session_state:
     st.session_state.feedbacks = []
 if "local_profiles" not in st.session_state:
     st.session_state.local_profiles = {
-        "User 1": [],
-        "User 2": [],
-        "User 3": [],
+        "User 1": [2571, 260, 1196], # Sci-Fi/Action: Matrix, Star Wars IV, V
+        "User 2": [1, 364, 588],     # Animation: Toy Story, Lion King, Aladdin
+        "User 3": [318, 356, 1721],  # Drama/Romance: Shawshank, Forrest Gump, Titanic
         "User 4": []
     }
 if "current_user" not in st.session_state:
@@ -476,22 +476,43 @@ def perform_similarity_search(query, top_n=15):
 
 
 def search_and_like(text_key, render_prefix, help_text="Click 'Like' to add them to your profile."):
-    """Search-by-title + Like -- parameterized search returning top 15 similarity matches."""
+    """Search-by-title + Like -- the original Home tab search pattern,
+    parameterized so each tab's search box/results use independent
+    session-state keys (each tab can be searched and tested separately).
+    """
     with st.form(key=f"{text_key}_form"):
         col1, col2 = st.columns([5, 1])
         with col1:
-            query = st.text_input("Enter movie title or keyword...", placeholder="e.g. Inception, Toy Story, space alien", key=text_key)
+            query = st.text_input("Enter movie title...", placeholder="e.g. Inception or Toy Story", key=text_key)
         with col2:
             st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
             st.form_submit_button("Search", use_container_width=True)
             
     if query:
-        results = perform_similarity_search(query, top_n=15)
+        results = movies[movies['title'].str.contains(query, case=False, na=False)].head(20)
         if results.empty:
             st.warning(f"No movies found matching '{query}'.")
         else:
-            st.success(f"Found top {len(results)} movies matching '{query}' (sorted by Cosine Similarity). {help_text}")
-            render_recommendations(results, render_prefix, score_label="Cosine Similarity")
+            st.success(f"Found {len(results)} movies. {help_text}")
+            results = results.copy()
+            results["score"] = results["movieId"].map(movie_avg_ratings)
+            score_label = "Average Rating"
+            
+            if model_option == "Collaborative Filtering" and st.session_state.liked_movie_ids:
+                cf_scores = collaborative_filtering.recommend(
+                    movies, user_item_matrix, movie_ids, movie_id_to_row,
+                    liked_movie_ids=st.session_state.liked_movie_ids,
+                    top_n=len(results),
+                    allowed_ids=set(results["movieId"].tolist())
+                )
+                if cf_scores is not None and not cf_scores.empty:
+                    pred_map = dict(zip(cf_scores["movieId"], cf_scores["rating"]))
+                    results["score"] = results.apply(
+                        lambda r: pred_map.get(r["movieId"], r["score"]), axis=1
+                    )
+                    score_label = "Expected Rating"
+            
+            render_recommendations(results, render_prefix, score_label=score_label)
 
 
 def search_movies_cb(text_key="cb_search_input", render_prefix="cb_search"):
@@ -846,7 +867,7 @@ with tab_ml:
                 with cc2:
                     pool_kwargs = refresh_controls("cf")
                 
-                recs, explanation = collaborative_filtering.recommend_user_based(
+                recs, explanation, _ = collaborative_filtering.recommend_user_based(
                     movies, user_item_matrix, movie_ids, movie_id_to_row,
                     current_user=st.session_state.current_user,
                     local_profiles=st.session_state.local_profiles, top_n=30
