@@ -64,11 +64,17 @@ def train_test_split_ratings(ratings: pd.DataFrame, test_size: float = 0.2, min_
 
 
 def precision_recall_f1_at_k(recommended_ids: list, relevant_ids: set, k: int):
-    if not recommended_ids:
+    """Compute Precision@K, Recall@K, and F1@K for a single user.
+    
+    Ensures fair comparison across all algorithms (Step 6):
+    - Denominator for Precision@K is strictly K.
+    - Ground-truth relevance is evaluated against relevant_ids (rating >= 4.0).
+    """
+    if not recommended_ids or k <= 0:
         return 0.0, 0.0, 0.0
     recommended_ids = recommended_ids[:k]
     hits = len(set(recommended_ids) & relevant_ids)
-    precision = hits / len(recommended_ids)
+    precision = hits / k
     recall = hits / len(relevant_ids) if relevant_ids else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
     return precision, recall, f1
@@ -217,28 +223,12 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
                 pred_cf = collaborative_filtering.predict_rating(user_item_matrix, movie_id_to_row, col, target_mid)
                 preds["collaborative"] = pred_cf
                 
-                # Content-based rating prediction based on similarity to liked profile
-                pred_cb_tfidf = None
-                if tfidf_matrix is not None and profile_cb_tfidf is not None:
-                    target_vec = tfidf_matrix[target_row_idx]
-                    if not isinstance(profile_cb_tfidf, np.ndarray):
-                        profile_cb_tfidf = np.asarray(profile_cb_tfidf)
-                    sim = cosine_similarity(profile_cb_tfidf.reshape(1, -1), target_vec)[0, 0]
-                    pred_cb_tfidf = max(1.0, min(5.0, user_mean_rating + (sim - 0.15) * 2.5))
-                preds["content_based"] = pred_cb_tfidf
+                # Content-based relies on similarity ranking, not star rating prediction.
+                preds["content_based"] = None
 
-                # Hybrid prediction (combines CF rating prediction if available)
-                alpha = 0.15
-                
+                # Hybrid prediction uses Collaborative Filtering for rating prediction if available
                 if tfidf_matrix is not None:
-                    if pred_cb_tfidf is not None and pred_cf is not None:
-                        preds["hybrid_tfidf"] = alpha * pred_cb_tfidf + (1 - alpha) * pred_cf
-                    elif pred_cb_tfidf is not None:
-                        preds["hybrid_tfidf"] = pred_cb_tfidf
-                    elif pred_cf is not None:
-                        preds["hybrid_tfidf"] = pred_cf
-                    else:
-                        preds["hybrid_tfidf"] = None
+                    preds["hybrid_tfidf"] = pred_cf
 
                 
                 for name, pred in preds.items():
