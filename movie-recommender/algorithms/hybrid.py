@@ -2,6 +2,7 @@
 
 """
 import csv
+import json
 import os
 import re
 from datetime import datetime
@@ -17,6 +18,22 @@ from algorithms.ranking import select_top_n
 
 _LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
 SEARCH_LOG_PATH = os.path.join(_LOG_DIR, "hybrid_search_log.csv")
+BEST_ALPHA_PATH = os.path.join(_LOG_DIR, "hybrid_best_alpha.json")
+FALLBACK_ALPHA = 0.15
+
+
+def get_best_alpha(default: float = FALLBACK_ALPHA) -> float:
+    """Return the alpha selected by offline evaluation, or a safe fallback.
+
+    The value is intentionally loaded from a small local file so the live
+    Streamlit app does not have to rerun the expensive evaluation every time.
+    """
+    try:
+        with open(BEST_ALPHA_PATH, "r", encoding="utf-8") as f:
+            value = float(json.load(f).get("best_alpha", default))
+        return min(max(value, 0.0), 1.0)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return float(default)
 
 
 @st.cache_data(show_spinner=False)
@@ -258,19 +275,16 @@ def log_search(query: str, matched_title: str | None, path: str = SEARCH_LOG_PAT
         pass  # logging is a nice-to-have, never worth breaking the request over
 
 
-def recommend_by_search(movies, content_matrix, user_item_matrix, movie_ids: np.ndarray,
-                         movie_id_to_row: dict, search_title: str, top_n: int = 10, alpha: float = 0.5,
-                         liked_movie_ids: list | None = None, allowed_ids: set | None = None,
-                         pool_size: int | None = None, sample_seed: int | None = None):
-
-    alpha = min(max(alpha, 0.0), 1.0)  # defensive clamp -- a slider can't
-    # send an out-of-range value, but this function shouldn't assume that.
+def recommend_by_search(
+    movies, content_matrix, user_item_matrix, movie_ids: np.ndarray,
+    movie_id_to_row: dict, search_title: str, top_n: int = 10, alpha: float = 0.5,
+    liked_movie_ids: list | None = None, allowed_ids: set | None = None,
+    pool_size: int | None = None, sample_seed: int | None = None
+):
+    """Search-driven hybrid: searched movie for content, liked movies for CF."""
+    alpha = min(max(alpha, 0.0), 1.0)
     liked_movie_ids = liked_movie_ids or []
 
-    # Rating count per movie (nonzero entries per row) doubles as a cheap
-    # popularity signal so an ambiguous search (e.g. "jedi", "star wars")
-    # resolves to the well-known movie instead of falling back to
-    # find_movie_by_search's shortest-title tiebreak.
     popularity = np.asarray((user_item_matrix > 0).sum(axis=1)).ravel()
     target_movie_id, matched_title, matched_genres = find_movie_by_search(
         movies, search_title, popularity=popularity, movie_id_to_row=movie_id_to_row
@@ -278,40 +292,93 @@ def recommend_by_search(movies, content_matrix, user_item_matrix, movie_ids: np.
     log_search(search_title, matched_title)
 
     if target_movie_id is None:
-        return None, {"error": f"No movie found matching '{search_title}'. Try a different spelling or a shorter title."}
-    if target_movie_id not in movie_id_to_row:
-        return None, {"error": f"'{matched_title}' has no content features available for comparison."}
-
-    target_row = movie_id_to_row[target_movie_id]
-    # Slice (not a plain int index) so this stays 2D for both a sparse
-    # TF-IDF matrix and a dense genre one-hot numpy array -- a single int
-    # index collapses a dense array to 1D, which cosine_similarity rejects.
-    content_scores = cosine_similarity(content_matrix[target_row:target_row + 1], content_matrix)[0]
-    collaborative_scores, personalized_used = combined_collaborative_score(
-        user_item_matrix, movie_id_to_row, movie_ids, target_movie_id, liked_movie_ids
-    )
-
-    combined = alpha * _normalize(content_scores) + (1 - alpha) * collaborative_scores
-
-    exclude = {target_movie_id, *liked_movie_ids}
-    results = select_top_n(combined, movie_ids, exclude, allowed_ids, top_n, pool_size, sample_seed)
-    if not results:
         return None, {
-            "error": f"No recommendations found similar to '{matched_title}'.",
-            "matched_title": matched_title, "matched_movie_id": target_movie_id,
+            "error": f"No movie found matching '{search_title}'. Try a different spelling or a shorter title."
+        }
+    if target_movie_id not in movie_id_to_row:
+        return None, {
+            "error": f"'{matched_title}' has no content features available for comparison."
         }
 
-    analysis = movies[movies["movieId"].isin(results)][["movieId", "title", "genres"]].copy()
-    analysis["content_score"] = analysis["movieId"].map(lambda mid: content_scores[movie_id_to_row[mid]])
-    analysis["collaborative_score"] = analysis["movieId"].map(lambda mid: collaborative_scores[movie_id_to_row[mid]])
-    analysis["score"] = analysis["movieId"].map(lambda mid: combined[movie_id_to_row[mid]])
-    analysis = analysis.sort_values("score", ascending=False).reset_index(drop=True)
+    target_row = movie_id_to_row[target_movie_id]
+    content_scores = cosine_similarity(
+        content_matrix[target_row:target_row + 1], content_matrix
+    )[0]
+    content_scores = _normalize(content_scores)
 
+    valid_liked_movie_ids = [
+        mid for mid in liked_movie_ids if mid in movie_id_to_row
+    ]
+
+    if valid_liked_movie_ids:
+        collaborative_scores = _personalized_user_based_cf_score(
+            user_item_matrix, movie_id_to_row, movie_ids, valid_liked_movie_ids
+        )
+        collaborative_scores = _normalize(collaborative_scores)
+        personalized_used = True
+    else:
+        collaborative_scores = np.zeros(len(movie_ids))
+        personalized_used = False
+
+    cf_available = bool(np.any(collaborative_scores > 0))
+
+    if cf_available:
+        effective_content_weight = alpha
+        effective_cf_weight = 1.0 - alpha
+    else:
+        effective_content_weight = 1.0
+        effective_cf_weight = 0.0
+
+    content_contribution = effective_content_weight * content_scores
+    collaborative_contribution = effective_cf_weight * collaborative_scores
+    combined = content_contribution + collaborative_contribution
+
+    exclude = {target_movie_id, *valid_liked_movie_ids}
+    results = select_top_n(
+        combined, movie_ids, exclude, allowed_ids, top_n, pool_size, sample_seed
+    )
+
+    if not results:
+        return None, {
+            "error": f"No recommendations found for '{matched_title}'.",
+            "matched_title": matched_title,
+            "matched_movie_id": target_movie_id,
+        }
+
+    analysis = movies[movies["movieId"].isin(results)][
+        ["movieId", "title", "genres"]
+    ].copy()
+
+    analysis["content_score"] = analysis["movieId"].map(
+        lambda mid: content_scores[movie_id_to_row[mid]]
+    )
+    analysis["collaborative_score"] = analysis["movieId"].map(
+        lambda mid: collaborative_scores[movie_id_to_row[mid]]
+    )
+    analysis["content_contribution"] = analysis["movieId"].map(
+        lambda mid: content_contribution[movie_id_to_row[mid]]
+    )
+    analysis["collaborative_contribution"] = analysis["movieId"].map(
+        lambda mid: collaborative_contribution[movie_id_to_row[mid]]
+    )
+    analysis["score"] = analysis["movieId"].map(
+        lambda mid: combined[movie_id_to_row[mid]]
+    )
+
+    analysis = analysis.sort_values("score", ascending=False).reset_index(drop=True)
     display = analysis[["movieId", "title", "genres"]].copy()
+
     meta = {
-        "matched_title": matched_title, "matched_movie_id": target_movie_id,
-        "matched_genres": matched_genres, "personalized": personalized_used,
-        "liked_movie_count": len(liked_movie_ids), "analysis": analysis,
+        "matched_title": matched_title,
+        "matched_movie_id": target_movie_id,
+        "matched_genres": matched_genres,
+        "personalized": personalized_used,
+        "liked_movie_count": len(valid_liked_movie_ids),
+        "alpha": alpha,
+        "effective_content_weight": effective_content_weight,
+        "effective_collaborative_weight": effective_cf_weight,
+        "cf_available": cf_available,
+        "analysis": analysis,
     }
     return display, meta
 

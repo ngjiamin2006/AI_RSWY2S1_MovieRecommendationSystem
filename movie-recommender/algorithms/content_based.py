@@ -80,6 +80,21 @@ def build_tfidf_profile(tfidf_matrix, movie_id_to_row: dict, liked_movie_ids: li
     return None
 
 
+def compute_search_scores(_matrix, _movie_id_to_row: dict, matched_movie_ids: list[int]) -> np.ndarray:
+    """Return content-based similarity scores for a title-search seed/set.
+
+    This is the shared scoring function used by both the standalone
+    content-based recommender and hybrid.py, ensuring the hybrid's content
+    component is exactly the same content signal as content_based.py.
+    """
+    rows = [_movie_id_to_row[mid] for mid in matched_movie_ids if mid in _movie_id_to_row]
+    if not rows:
+        return np.zeros(_matrix.shape[0], dtype=float)
+
+    sims = cosine_similarity(_matrix[rows], _matrix)
+    return np.asarray(sims.max(axis=0)).ravel()
+
+
 @st.cache_data(show_spinner=False)
 def recommend_by_search(_movies, _matrix, _movie_ids: np.ndarray, _movie_id_to_row: dict,
                          matched_movie_ids: list[int], top_n: int = 10, allowed_ids: set | None = None,
@@ -100,8 +115,7 @@ def recommend_by_search(_movies, _matrix, _movie_ids: np.ndarray, _movie_id_to_r
     if not rows:
         return None
 
-    sims = cosine_similarity(_matrix[rows], _matrix)
-    scores = sims.max(axis=0)
+    scores = compute_search_scores(_matrix, _movie_id_to_row, matched_movie_ids)
     exclude = set(matched_movie_ids)
     results = select_top_n(scores, _movie_ids, exclude, allowed_ids, top_n, pool_size, sample_seed)
     if not results:
