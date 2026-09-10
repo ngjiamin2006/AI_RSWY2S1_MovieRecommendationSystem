@@ -1077,14 +1077,31 @@ if is_dev:
             }
             display_results.rename(columns=col_names, inplace=True)
 
-            st.dataframe(display_results)
-            st.bar_chart(display_results[[f"Precision@{eval_k}", f"Recall@{eval_k}", f"F1@{eval_k}"]])
-            st.bar_chart(display_results[["Coverage", "Diversity"]])
+            st.write("#### 🎯 Top-K Ranking Metrics")
+            ranking_cols = [f"Precision@{eval_k}", f"Recall@{eval_k}", f"F1@{eval_k}", "Coverage", "Diversity"]
+            st.dataframe(display_results[ranking_cols])
 
-            st.write("#### Rating Prediction Metrics (All Algorithms)")
-            metrics_df = display_results[["RMSE", "MSE", "MAE", "Accuracy (±1 Star)"]].dropna(how='all')
-            if not metrics_df.empty:
-                st.dataframe(metrics_df)
+            if hasattr(results, "attrs") and "t_build" in results.attrs:
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.metric("Matrix Build Time (1-time)", f"{results.attrs['t_build']:.3f} s")
+                with c2:
+                    st.metric("Total Evaluation Runtime", f"{results.attrs['t_eval']:.3f} s")
+
+            st.bar_chart(display_results[[f"Precision@{eval_k}", f"Recall@{eval_k}", f"F1@{eval_k}"]])
+
+            st.write("#### 📉 Rating Prediction & Performance Metrics")
+            error_cols = ["RMSE", "MSE", "MAE", "Accuracy (±1 Star)", "Avg Time (s)"]
+            st.dataframe(display_results[error_cols].fillna("N/A"))
+
+            # Plot bar chart for RMSE and MAE (lower error is better)
+            rmse_data = display_results[["RMSE", "MAE"]].dropna()
+            if not rmse_data.empty:
+                st.caption("📊 **Rating Prediction Error (RMSE & MAE) — Lower is Better**")
+                st.bar_chart(rmse_data)
+
+
+
 
 
 # tab_best has been moved inside tab_ml

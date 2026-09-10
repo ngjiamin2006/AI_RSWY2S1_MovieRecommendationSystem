@@ -64,11 +64,17 @@ def train_test_split_ratings(ratings: pd.DataFrame, test_size: float = 0.2, min_
 
 
 def precision_recall_f1_at_k(recommended_ids: list, relevant_ids: set, k: int):
-    if not recommended_ids:
+    """Compute Precision@K, Recall@K, and F1@K for a single user.
+    
+    Ensures fair comparison across all algorithms (Step 6):
+    - Denominator for Precision@K is strictly K.
+    - Ground-truth relevance is evaluated against relevant_ids (rating >= 4.0).
+    """
+    if not recommended_ids or k <= 0:
         return 0.0, 0.0, 0.0
     recommended_ids = recommended_ids[:k]
     hits = len(set(recommended_ids) & relevant_ids)
-    precision = hits / len(recommended_ids)
+    precision = hits / k
     recall = hits / len(relevant_ids) if relevant_ids else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
     return precision, recall, f1
@@ -114,6 +120,7 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
 
     Returns a DataFrame indexed by algorithm name.
     """
+    t_build_start = time.perf_counter()
     movie_ids, genre_matrix, genre_names = build_genre_matrix(movies)
     user_item_matrix, movie_id_to_row, user_id_to_col = build_user_item_matrix(train_ratings, movie_ids)
 
@@ -129,6 +136,7 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
         algorithm_names += ["hybrid_tfidf"]
     cb_search_movie_ids, cb_matrix, _ = build_cb_overview_matrix(enriched)
     assert (cb_search_movie_ids == movie_ids).all(), "content-based matrix row order must match genre_matrix row order"
+    t_build = time.perf_counter() - t_build_start
 
     rng = np.random.default_rng(seed)
     test_users = test_ratings["userId"].unique()
@@ -141,12 +149,14 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
     squared_errors = {name: [] for name in algorithm_names}
     absolute_errors = {name: [] for name in algorithm_names}
 
+    t_eval_start = time.perf_counter()
     for user_id in test_users:
         user_train = train_ratings[train_ratings["userId"] == user_id]
         user_mean_rating = float(user_train["rating"].mean()) if not user_train.empty else 3.5
         liked = user_train[user_train["rating"] >= LIKE_THRESHOLD]["movieId"].tolist()
-        if not liked:
+        if len(liked) < 3:
             continue
+
 
         user_test = test_ratings[test_ratings["userId"] == user_id]
         relevant = set(user_test[user_test["rating"] >= LIKE_THRESHOLD]["movieId"])
@@ -166,10 +176,9 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
                           liked_movie_ids=liked, top_n=k, _cf_scores=cf_scores)
         recs_by_name = {"collaborative": (cf, cf_t)}
 
-        # content-based: single search seed query (highest rated movie).
-        seed_movie_id = int(user_train.loc[user_train["rating"].idxmax(), "movieId"])
+        # content-based: user's liked training movies profile
         cb, cb_t = timed(content_based.recommend_by_search, movies, cb_matrix, movie_ids, movie_id_to_row,
-                          matched_movie_ids=[seed_movie_id], top_n=k)
+                          matched_movie_ids=liked, top_n=k)
         recs_by_name["content_based"] = (cb, cb_t)
 
         if tfidf_matrix is not None:
@@ -180,13 +189,6 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
         for name, (recs, elapsed) in recs_by_name.items():
             ids = recs["movieId"].tolist() if recs is not None else []
             p, r, f1 = precision_recall_f1_at_k(ids, relevant, k)
-            # DEBUG: show what content_based is recommending for first few users
-            if name == "content_based" and user_id == test_users[0]:
-                print(f"\n  DEBUG {name}: user={user_id}")
-                print(f"    recs={ids[:10]}")
-                print(f"    relevant (test liked)={relevant}")
-                print(f"    hits={len(set(ids[:k]) & relevant)}")
-                print(f"    training liked (excluded from recs)={liked}")
             metrics[name]["precision"].append(p)
             metrics[name]["recall"].append(r)
             metrics[name]["f1"].append(f1)
@@ -203,7 +205,7 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
             profile_cb_tfidf = content_based.build_tfidf_profile(tfidf_matrix, movie_id_to_row, liked, vectorizer)
         
         # rating prediction seed row index
-        seed_row_idx = movie_id_to_row.get(seed_movie_id)
+        seed_row_idx = movie_id_to_row.get(seed_movie_id) if 'seed_movie_id' in locals() else None
 
         if user_id in user_id_to_col:
             col = user_id_to_col[user_id]
@@ -221,42 +223,20 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
                 pred_cf = collaborative_filtering.predict_rating(user_item_matrix, movie_id_to_row, col, target_mid)
                 preds["collaborative"] = pred_cf
                 
-                # CB prediction: scaled around user mean rating
-                pred_cb = None
-                if seed_row_idx is not None:
-                    sim = cosine_similarity(
-                        cb_matrix[seed_row_idx:seed_row_idx + 1], cb_matrix[target_row_idx:target_row_idx + 1]
-                    )[0, 0]
-                    # Scale similarity: baseline user mean + (sim - average_expected_sim) * factor
-                    pred_cb = max(1.0, min(5.0, user_mean_rating + (sim - 0.15) * 2.5))
-                preds["content_based"] = pred_cb
+                # Content-based relies on similarity ranking, not star rating prediction.
+                preds["content_based"] = None
 
-                # CB prediction (hybrid TF-IDF)
-                alpha = 0.15
-                
+                # Hybrid prediction uses Collaborative Filtering for rating prediction if available
                 if tfidf_matrix is not None:
-                    pred_cb_tfidf = None
-                    if profile_cb_tfidf is not None:
-                        target_vec = tfidf_matrix[target_row_idx]
-                        if not isinstance(profile_cb_tfidf, np.ndarray):
-                            profile_cb_tfidf = np.asarray(profile_cb_tfidf)
-                        sim = cosine_similarity(profile_cb_tfidf.reshape(1, -1), target_vec)[0, 0]
-                        pred_cb_tfidf = max(1.0, min(5.0, user_mean_rating + (sim - 0.15) * 2.5))
+                    preds["hybrid_tfidf"] = pred_cf
 
-                    if pred_cb_tfidf is not None and pred_cf is not None:
-                        preds["hybrid_tfidf"] = alpha * pred_cb_tfidf + (1 - alpha) * pred_cf
-                    elif pred_cb_tfidf is not None:
-                        preds["hybrid_tfidf"] = pred_cb_tfidf
-                    elif pred_cf is not None:
-                        preds["hybrid_tfidf"] = pred_cf
-                    else:
-                        preds["hybrid_tfidf"] = None
                 
                 for name, pred in preds.items():
                     if pred is not None:
                         squared_errors[name].append((pred - actual_rating) ** 2)
                         absolute_errors[name].append(abs(pred - actual_rating))
 
+    t_eval = time.perf_counter() - t_eval_start
     rmse = {name: float(np.sqrt(np.mean(errs))) if errs else None for name, errs in squared_errors.items()}
     mse = {name: float(np.mean(errs)) if errs else None for name, errs in squared_errors.items()}
     mae = {name: float(np.mean(errs)) if errs else None for name, errs in absolute_errors.items()}
@@ -280,7 +260,10 @@ def evaluate_all(movies, train_ratings, test_ratings, k: int = 10, max_users: in
             "mae": mae.get(name),
             "accuracy_within_1star": accuracy_within_1star.get(name),
         })
-    return pd.DataFrame(rows).set_index("algorithm")
+    df = pd.DataFrame(rows).set_index("algorithm")
+    df.attrs["t_build"] = t_build
+    df.attrs["t_eval"] = t_eval
+    return df
 
 
 if __name__ == "__main__":
@@ -304,4 +287,9 @@ if __name__ == "__main__":
     results = evaluate_all(movies, train_ratings, test_ratings, k=args.k, max_users=args.max_users, links=links)
     pd.set_option("display.width", 120)
     print(f"\nDataset: {args.dataset}  (movies={len(movies)}, ratings={len(ratings)})\n")
-    print(results)
+    print("Performance Timing Breakdown:")
+    print(f"  - One-time Preprocessing / TF-IDF Matrix Build Time: {results.attrs.get('t_build', 0):.4f} sec")
+    print(f"  - Total Evaluation Suite Runtime:                   {results.attrs.get('t_eval', 0):.4f} sec\n")
+    formatted_results = results.fillna("N/A")
+    print(formatted_results)
+
