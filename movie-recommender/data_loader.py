@@ -28,9 +28,18 @@ def tmdb_available() -> bool:
 # data/ml-25m/. Both directories use the same movies.csv/ratings.csv/links.csv
 # schema, so everything downstream is agnostic to which one is active.
 DATASET_DIRS = {
-    "ml-latest-small": DATA_DIR,
+    "ml-latest-small": os.path.join(DATA_DIR, "ml-latest-small") if os.path.exists(os.path.join(DATA_DIR, "ml-latest-small", "movies.csv")) else DATA_DIR,
     "ml-25m": os.path.join(DATA_DIR, "ml-25m"),
 }
+
+
+def _get_dataset_dir(dataset: str = "ml-latest-small") -> str:
+    data_dir = DATASET_DIRS.get(dataset, DATA_DIR)
+    if not os.path.exists(os.path.join(data_dir, "movies.csv")):
+        alt = os.path.join(DATA_DIR, "ml-25m")
+        if os.path.exists(os.path.join(alt, "movies.csv")):
+            return alt
+    return data_dir
 
 
 def load_data(dataset: str = "ml-latest-small"):
@@ -40,7 +49,7 @@ def load_data(dataset: str = "ml-latest-small"):
     timestamp column -- matters at ml-25m's scale (25M rows), harmless at
     ml-latest-small's.
     """
-    data_dir = DATASET_DIRS[dataset]
+    data_dir = _get_dataset_dir(dataset)
     movies = pd.read_csv(os.path.join(data_dir, "movies.csv"))
     ratings = pd.read_csv(
         os.path.join(data_dir, "ratings.csv"),
@@ -57,7 +66,9 @@ def load_data(dataset: str = "ml-latest-small"):
 
 def load_links(dataset: str = "ml-latest-small") -> pd.DataFrame:
     """Load links.csv (movieId -> imdbId/tmdbId) for the given dataset."""
-    return pd.read_csv(os.path.join(DATASET_DIRS[dataset], "links.csv"))
+    data_dir = _get_dataset_dir(dataset)
+    return pd.read_csv(os.path.join(data_dir, "links.csv"))
+
 
 
 def build_genre_matrix(movies: pd.DataFrame):
@@ -243,16 +254,18 @@ def build_content_soup(movies_enriched: pd.DataFrame) -> pd.Series:
     spuriously match unrelated actors/directors sharing a first or last name.
     """
     def soup(row):
-        tokens = list(row["genre_list"])
+        # Boost genres and director weight for sharper content matching
+        tokens = list(row["genre_list"]) * 2
         if isinstance(row.get("keywords_list"), list):
             tokens += row["keywords_list"]
         if isinstance(row.get("cast_names"), list):
             tokens += row["cast_names"][:5]  # top-billed cast only
         if pd.notna(row.get("director")):
-            tokens.append(row["director"])
+            tokens += [row["director"]] * 2
         return " ".join(str(t).replace(" ", "") for t in tokens)
 
     return movies_enriched.apply(soup, axis=1)
+
 
 
 class _FieldWeightedVectorizer:
