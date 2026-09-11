@@ -838,7 +838,7 @@ with tab_home:
 with tab_ml:
     if not is_dev:
         render_hybrid_search(
-            alpha=0.4, show_analysis=False, show_search_log=False,
+            alpha=0.3, show_analysis=False, show_search_log=False,
             caption="Search for a movie you like -- we'll find similar ones for you. No liking/rating needed first.",
         )
     else:
@@ -1032,7 +1032,7 @@ with tab_ml:
                         render_recommendations(recs_item_based, "cf", score_label="Expected Rating")
 
         elif model_option == "Hybrid":
-            alpha = st.slider("Weight towards content-based (alpha)", 0.0, 1.0, 0.4, 0.05, key="hy_alpha")
+            alpha = st.slider("Weight towards content-based (alpha)", 0.0, 1.0, 0.3, 0.05, key="hy_alpha")
             render_hybrid_search(
                 alpha=alpha, show_analysis=True, show_search_log=True,
                 caption=(
@@ -1193,7 +1193,7 @@ with tab_survey:
             st.bar_chart(avg_scores)
             
         with st.expander("View Recent Comments"):
-            for fb in reversed(st.session_state.feedbarecs,metcks[-5:]):
+            for fb in reversed(st.session_state.feedbacks[-5:]):
                 if fb["Comments"]:
                     st.info(f"**Quality: {fb['Quality']}/5 | UI Design: {fb['UI Design']}/5 | Performance: {fb['Performance']}/5**\n\n{fb['Comments']}")
 
