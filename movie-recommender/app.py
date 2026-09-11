@@ -453,7 +453,7 @@ def refresh_controls(key_prefix):
     return {"pool_size": 30, "sample_seed": count} if count > 0 else {}
 
 
-def perform_similarity_search(query, top_n=15):
+def perform_similarity_search(query, top_n=15, allowed_ids=None):
     """Semantic content search: builds a rich content profile from matched titles (or TF-IDF text),
     calculates Cosine Similarity across all catalog movies, and returns the top 15 highest similarity items.
     """
@@ -488,7 +488,10 @@ def perform_similarity_search(query, top_n=15):
     res_df["score"] = scores
     
     # Filter non-zero similarity scores and sort strictly descending (highest Cosine Similarity first)
-    res_df = res_df[res_df["score"] > 0].sort_values("score", ascending=False).head(top_n).reset_index(drop=True)
+    res_df = res_df[res_df["score"] > 0]
+    if allowed_ids is not None:
+        res_df = res_df[res_df["movieId"].isin(allowed_ids)]
+    res_df = res_df.sort_values("score", ascending=False).head(top_n).reset_index(drop=True)
     return res_df
 
 
@@ -546,7 +549,7 @@ def search_movies_cb(text_key="cb_search_input", render_prefix="cb_search"):
             st.form_submit_button("Search", use_container_width=True)
             
     if query:
-        matches = perform_similarity_search(query, top_n=15)
+        matches = perform_similarity_search(query, top_n=15, allowed_ids=allowed_ids)
         if matches.empty:
             st.warning(f"No movies found matching '{query}'.")
             st.session_state.cb_matched_ids = []
@@ -970,7 +973,8 @@ with tab_ml:
                 result = collaborative_filtering.recommend_user_based(
                     movies, user_item_matrix, movie_ids, movie_id_to_row,
                     current_user=st.session_state.current_user,
-                    local_profiles=st.session_state.local_profiles, top_n=30
+                    local_profiles=st.session_state.local_profiles, top_n=30,
+                    allowed_ids=allowed_ids,
                 )
                 recs, explanation, jaccard_score = result[:3]
 

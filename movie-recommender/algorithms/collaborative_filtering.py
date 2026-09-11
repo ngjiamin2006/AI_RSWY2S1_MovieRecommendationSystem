@@ -339,7 +339,7 @@ def _apply_mmr(cf_scores: np.ndarray, _movie_ids: np.ndarray,
 def recommend_user_based(_movies, _user_item_matrix: csr_matrix,
                           _movie_ids: np.ndarray, _movie_id_to_row: dict,
                           current_user: str, local_profiles: dict,
-                          top_n: int = 10):
+                          top_n: int = 10, allowed_ids: set | None = None):
     """User-Based Collaborative Filtering for the Interactive Demo Tab.
 
     Phase 1 — User-User Similarity via Jaccard:
@@ -412,7 +412,8 @@ def recommend_user_based(_movies, _user_item_matrix: csr_matrix,
     # Candidate pool for item-based fallback: unseen movies with positive score
     order = np.argsort(-cf_scores)
     allowed_candidates = [idx for idx in order
-                          if _movie_ids[idx] not in my_likes and cf_scores[idx] > 0]
+                          if _movie_ids[idx] not in my_likes and cf_scores[idx] > 0
+                          and (allowed_ids is None or _movie_ids[idx] in allowed_ids)]
     max_cf = cf_scores.max() if cf_scores.max() > 0 else 1.0
 
     # -----------------------------------------------------------------------
@@ -434,7 +435,8 @@ def recommend_user_based(_movies, _user_item_matrix: csr_matrix,
     # -----------------------------------------------------------------------
     # Case B: User match found → user-based recs + MMR padding
     # -----------------------------------------------------------------------
-    user_based_recs = [mid for mid in best_match_likes if mid not in my_likes]
+    user_based_recs = [mid for mid in best_match_likes
+                       if mid not in my_likes and (allowed_ids is None or mid in allowed_ids)]
 
     remaining_n = top_n - len(user_based_recs)
     padding_candidates = [idx for idx in allowed_candidates
