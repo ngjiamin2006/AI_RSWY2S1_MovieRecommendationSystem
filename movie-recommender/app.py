@@ -720,7 +720,7 @@ def render_searched_movie_card(movie_id, title, genres):
 
     Genre is shown here (on the searched movie) as context for what was
     matched -- distinct from the recommendation cards below, which stay
-    genre-free per spec (genre/score there are analysis-only).
+    genre-free per spec (genre/score there are analysis-dev_,only).
     """
     poster = poster_lookup.get(movie_id)
     genre_list = [g for g in str(genres).split("|") if g and g != "(no genres listed)"]
@@ -756,7 +756,7 @@ def render_hybrid_search(alpha, show_analysis, show_search_log, caption):
     analysis breakdown) and user view (fixed alpha, no backend details shown).
     """
     st.caption(caption)
-    content_matrix = tfidf_matrix if tfidf_matrix is not None else genre_matrix
+    content_matrix = cb_matrix
 
     with st.form(key="hy_search_form"):
         col1, col2 = st.columns([5, 1])
@@ -770,9 +770,17 @@ def render_hybrid_search(alpha, show_analysis, show_search_log, caption):
 
     if hy_search:
         recs, meta = hybrid.recommend_by_search(
-            movies, content_matrix, user_item_matrix, movie_ids, movie_id_to_row,
-            search_title=hy_search, top_n=15, alpha=alpha, allowed_ids=allowed_ids,
-        )
+    movies,
+    content_matrix,
+    user_item_matrix,
+    movie_ids,
+    movie_id_to_row,
+    search_title=hy_search,
+    top_n=15,
+    alpha=alpha,
+    liked_movie_ids=st.session_state.liked_movie_ids,
+    allowed_ids=allowed_ids,
+)
         if meta.get("error"):
             st.warning(meta["error"])
         else:
@@ -830,7 +838,7 @@ with tab_home:
 with tab_ml:
     if not is_dev:
         render_hybrid_search(
-            alpha=0.15, show_analysis=False, show_search_log=False,
+            alpha=0.3, show_analysis=False, show_search_log=False,
             caption="Search for a movie you like -- we'll find similar ones for you. No liking/rating needed first.",
         )
     else:
@@ -1024,7 +1032,7 @@ with tab_ml:
                         render_recommendations(recs_item_based, "cf", score_label="Expected Rating")
 
         elif model_option == "Hybrid":
-            alpha = st.slider("Weight towards content-based (alpha)", 0.0, 1.0, 0.15, 0.05, key="hy_alpha")
+            alpha = st.slider("Weight towards content-based (alpha)", 0.0, 1.0, 0.3, 0.05, key="hy_alpha")
             render_hybrid_search(
                 alpha=alpha, show_analysis=True, show_search_log=True,
                 caption=(
