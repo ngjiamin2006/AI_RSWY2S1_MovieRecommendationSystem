@@ -337,135 +337,61 @@ def _apply_mmr(cf_scores: np.ndarray, _movie_ids: np.ndarray,
 
 @st.cache_data(show_spinner=False)
 def recommend_user_based(_movies, _user_item_matrix: csr_matrix,
-                          _movie_ids: np.ndarray, _movie_id_to_row: dict,
-                          current_user: str, local_profiles: dict,
-                          top_n: int = 10, allowed_ids: set | None = None):
-    """User-Based Collaborative Filtering for the Interactive Demo Tab.
+                         _movie_ids: np.ndarray, _movie_id_to_row: dict,
+                         liked_movie_ids: list[int] | None = None,
+                         top_n: int = 10, allowed_ids: set | None = None):
+    """Collaborative recommendations using item-based cosine similarity.
 
-    Phase 1 — User-User Similarity via Jaccard:
-        Finds which other local simulated user (e.g., 'User 2') has the most
-        overlapping likes with the current user using the Jaccard coefficient:
-            J(A, B) = |A ∩ B| / |A ∪ B|
-        Recommends movies that the best-matched user liked but the current
-        user hasn't seen yet.
-
-    Phase 2 — Item-Based CF Fallback via Cosine Similarity:
-        If no matching user is found (or to pad remaining slots), falls back to
-        Item-Based CF with MMR diversification.
+    The user's liked movies are used as seed items. Their rating vectors are
+    compared with every other movie in the user-item matrix using cosine
+    similarity, then the similarities are averaged across all liked movies.
+    MMR is applied to diversify the final recommendation list.
 
     Returns:
-        (DataFrame | None, explanation: str, jaccard_score: float)
+        (DataFrame | None, explanation: str)
     """
-    my_likes = set(local_profiles.get(current_user, []))
+    my_likes = set(liked_movie_ids or [])
     if not my_likes:
         return (None,
-                "You haven't liked any movies yet. Like some movies to see collaborative recommendations!",
-                0.0)
+                "You haven't liked any movies yet. Like some movies to see collaborative recommendations!")
 
-    # -----------------------------------------------------------------------
-    # Phase 1: Jaccard similarity — find the best-matching local user
-    # -----------------------------------------------------------------------
-    best_match_user = None
-    best_match_score = 0.0
-    best_match_likes: list = []
-
-    for other_user, their_likes in local_profiles.items():
-        if other_user == current_user or not their_likes:
-            continue
-
-        their_set = set(their_likes)
-
-        # Skip if this user has nothing new to offer
-        if not (their_set - my_likes):
-            continue
-
-        # Jaccard similarity: Intersection over Union
-        intersection = len(my_likes & their_set)
-        union = len(my_likes | their_set)
-        jaccard = intersection / union if union > 0 else 0.0
-
-        if jaccard > best_match_score:
-            best_match_score = jaccard
-            best_match_user = other_user
-            best_match_likes = their_likes
-
-    # -----------------------------------------------------------------------
-    # Phase 2: Cosine Similarity for item-based fallback / padding
-    # -----------------------------------------------------------------------
     liked_rows = [_movie_id_to_row[mid] for mid in my_likes if mid in _movie_id_to_row]
-    cf_scores = np.zeros(len(_movie_ids))
+    if not liked_rows:
+        return None, "No recommendations available right now."
 
-    if liked_rows:
-        liked_vectors = _user_item_matrix[liked_rows]
-        # Memory-safe cosine similarity: manual sparse dot product, never .toarray() full matrix
-        liked_norms = np.sqrt(np.asarray(liked_vectors.power(2).sum(axis=1)).flatten())
-        liked_norms = np.maximum(liked_norms, 1e-12)
-        movie_norms = np.sqrt(np.asarray(_user_item_matrix.power(2).sum(axis=1)).flatten())
-        movie_norms = np.maximum(movie_norms, 1e-12)
-        raw_dots = liked_vectors @ _user_item_matrix.T
-        if hasattr(raw_dots, "toarray"):
-            raw_dots = raw_dots.toarray()              # safe: shape is (n_liked, n_movies)
-        cf_scores = (raw_dots / liked_norms[:, None] / movie_norms[None, :]).mean(axis=0)
-        # Note: Correlation Similarity is computed on-demand in app.py via
-        # compute_correlation_for_rows() for just the ~30 displayed movies.
+    liked_vectors = _user_item_matrix[liked_rows]
+    liked_norms = np.sqrt(np.asarray(liked_vectors.power(2).sum(axis=1)).flatten())
+    liked_norms = np.maximum(liked_norms, 1e-12)
+    movie_norms = np.sqrt(np.asarray(_user_item_matrix.power(2).sum(axis=1)).flatten())
+    movie_norms = np.maximum(movie_norms, 1e-12)
 
-    # Candidate pool for item-based fallback: unseen movies with positive score
+    raw_dots = liked_vectors @ _user_item_matrix.T
+    if hasattr(raw_dots, "toarray"):
+        raw_dots = raw_dots.toarray()
+
+    cf_scores = (raw_dots / liked_norms[:, None] / movie_norms[None, :]).mean(axis=0)
+
     order = np.argsort(-cf_scores)
-    allowed_candidates = [idx for idx in order
-                          if _movie_ids[idx] not in my_likes and cf_scores[idx] > 0
-                          and (allowed_ids is None or _movie_ids[idx] in allowed_ids)]
+    allowed_candidates = [
+        idx for idx in order
+        if _movie_ids[idx] not in my_likes
+        and cf_scores[idx] > 0
+        and (allowed_ids is None or _movie_ids[idx] in allowed_ids)
+    ]
+
+    item_based_recs = _apply_mmr(
+        cf_scores, _movie_ids, _user_item_matrix,
+        allowed_candidates, top_n=top_n
+    )
+    if not item_based_recs:
+        return None, "No recommendations available right now."
+
     max_cf = cf_scores.max() if cf_scores.max() > 0 else 1.0
-
-    # -----------------------------------------------------------------------
-    # Case A: No similar user found → pure item-based CF with MMR
-    # -----------------------------------------------------------------------
-    if not best_match_user or best_match_score == 0:
-        item_based_recs = _apply_mmr(cf_scores, _movie_ids, _user_item_matrix,
-                                     allowed_candidates, top_n=top_n)
-        if not item_based_recs:
-            return None, "No recommendations available right now.", 0.0
-
-        out = _movies[_movies["movieId"].isin(item_based_recs)][["movieId", "title", "genres"]].copy()
-        out["rating"] = out["movieId"].map(
-            lambda mid: 3.5 + 1.5 * (cf_scores[_movie_id_to_row[mid]] / max_cf)
-        )
-        out = out.sort_values("rating", ascending=False).head(top_n).reset_index(drop=True)
-        return out, "💡 **Other movies you might like**", 0.0
-
-    # -----------------------------------------------------------------------
-    # Case B: User match found → user-based recs + MMR padding
-    # -----------------------------------------------------------------------
-    user_based_recs = [mid for mid in best_match_likes
-                       if mid not in my_likes and (allowed_ids is None or mid in allowed_ids)]
-
-    remaining_n = top_n - len(user_based_recs)
-    padding_candidates = [idx for idx in allowed_candidates
-                          if _movie_ids[idx] not in user_based_recs]
-    item_based_recs = (_apply_mmr(cf_scores, _movie_ids, _user_item_matrix,
-                                   padding_candidates, top_n=remaining_n)
-                       if remaining_n > 0 else [])
-
-    final_recs = (user_based_recs + item_based_recs)[:top_n]
-
-    if not final_recs:
-        return (None,
-                f"Your taste perfectly matches **{best_match_user}**! "
-                "But they haven't liked anything you haven't already seen.",
-                best_match_score)
-
-    # Build the output DataFrame
-    out = _movies[_movies["movieId"].isin(final_recs)][["movieId", "title", "genres"]].copy()
-
-    # Scale expected ratings:
-    #   User-matched movies: 4.5 – 5.0 (based on Jaccard strength)
-    #   Item-based padded:   3.5 – 4.5 (based on normalised cosine score)
-    user_based_set = set(user_based_recs)
-
-    def get_rating(mid: int) -> float:
-        if mid in user_based_set:
-            return 4.5 + 0.5 * best_match_score   # e.g., 80% Jaccard → 4.9★
-        return 3.5 + 1.0 * (cf_scores[_movie_id_to_row[mid]] / max_cf)
-
-    out["rating"] = out["movieId"].map(get_rating)
+    out = _movies[_movies["movieId"].isin(item_based_recs)][
+        ["movieId", "title", "genres"]
+    ].copy()
+    out["rating"] = out["movieId"].map(
+        lambda mid: 3.5 + 1.5 * (cf_scores[_movie_id_to_row[mid]] / max_cf)
+    )
     out = out.sort_values("rating", ascending=False).head(top_n).reset_index(drop=True)
-    return out, "💡 **Other movies you might like**", best_match_score
+    return out, "💡 **Other movies you might like**"

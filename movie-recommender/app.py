@@ -972,21 +972,19 @@ with tab_ml:
                 
                 result = collaborative_filtering.recommend_user_based(
                     movies, user_item_matrix, movie_ids, movie_id_to_row,
-                    current_user=st.session_state.current_user,
-                    local_profiles=st.session_state.local_profiles, top_n=30,
+                    liked_movie_ids=st.session_state.liked_movie_ids, top_n=30,
                     allowed_ids=allowed_ids,
                 )
-                recs, explanation, jaccard_score = result[:3]
+                recs, explanation = result
 
                 if explanation:
                     st.info(explanation)
                 
                 # --- Developer Metrics Panel ---
                 if is_dev:
-                    dm1, dm2, dm3 = st.columns(3)
-                    dm1.metric("Jaccard Similarity", f"{jaccard_score:.3f}", help="Overlap between your likes and the best matched user's likes (Intersection ÷ Union)")
-                    dm2.metric("Similarity Method", "Cosine + Correlation", help="Cosine Similarity and Pearson Correlation Similarity are both computed per movie")
-                    dm3.metric("K (Top-K Neighbors)", "20", help="predict_rating() uses Top-K=20 most similar movies to compute a weighted average prediction")
+                    dm1, dm2 = st.columns(2)
+                    dm1.metric("Similarity Method", "Cosine + Correlation", help="Cosine Similarity and Pearson Correlation Similarity are both computed per movie")
+                    dm2.metric("K (Top-K Neighbors)", "20", help="predict_rating() uses Top-K=20 most similar movies to compute a weighted average prediction")
 
                     st.divider()
 
