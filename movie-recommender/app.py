@@ -1102,18 +1102,6 @@ if is_dev:
 
             st.bar_chart(display_results[[f"Precision@{eval_k}", f"Recall@{eval_k}", f"F1@{eval_k}"]])
 
-            st.write("#### 📉 Rating Prediction & Performance Metrics")
-            error_cols = ["RMSE", "MSE", "MAE", "Accuracy (±1 Star)", "Avg Time (s)"]
-            st.dataframe(display_results[error_cols].fillna("N/A"))
-
-            # Plot bar chart for RMSE and MAE (lower error is better)
-            rmse_data = display_results[["RMSE", "MAE"]].dropna()
-            if not rmse_data.empty:
-                st.caption("📊 **Rating Prediction Error (RMSE & MAE) — Lower is Better**")
-                st.bar_chart(rmse_data)
-
-
-
 
 
 # tab_best has been moved inside tab_ml
@@ -1197,7 +1185,7 @@ with tab_survey:
             st.bar_chart(avg_scores)
             
         with st.expander("View Recent Comments"):
-            for fb in reversed(st.session_state.feedbarecs,metcks[-5:]):
+            for fb in reversed(st.session_state.feedbacks[-5:]):
                 if fb["Comments"]:
                     st.info(f"**Quality: {fb['Quality']}/5 | UI Design: {fb['UI Design']}/5 | Performance: {fb['Performance']}/5**\n\n{fb['Comments']}")
 
